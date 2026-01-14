@@ -15,7 +15,7 @@ authors = [
 ]
 maintainers = [{ name = "Weitang Li", email = "liwt31@gmail.com" }]
 
-license = "Apache-2.0" 
+license = { file = "LICENSE" }
 readme = "README.md"
 requires-python = ">=3.6"
 
@@ -46,5 +46,5 @@ homepage = "https://github.com/shuaigroup/Renormalizer"
 documentation = "https://shuaigroup.github.io/Renormalizer/"
 
 [build-system]
-requires = ["setuptools>=77.0.0", "wheel", "build"]
+requires = ["setuptools<=68.2.2", "wheel", "build"]
 build-backend = "setuptools.build_meta"

@@ -132,7 +132,7 @@ class Model:
         """
         return self._enumerate_dof()
     
-    @cached_property
+    @property
     def nsite(self) -> int:
         """
         Number of sites in the MPS/MPO to be constructed.
