@@ -1,0 +1,11 @@
+2026-01-19 09:35:08,398[INFO] Use NumPy as backend
+2026-01-19 09:35:08,398[INFO] numpy random seed is 9012
+2026-01-19 09:35:08,398[INFO] random seed is 1092
+2026-01-19 09:35:08,486[INFO] Git Commit Hash: f9119843405bd30e3803d487656f758a62074537
+2026-01-19 09:35:08,487[INFO] use 64 bits
+/curie-home/zengjj/Renormalizer/renormalizer/model/multiset_model.py:432: RuntimeWarning: Precision loss occurred in moment calculation due to catastrophic cancellation. This occurs when the data are nearly identical. Results may be unreliable.
+  steps_stat = stats.describe(local_steps)
+/curie-home/zengjj/.conda/envs/renormalizer/lib/python3.8/site-packages/scipy/stats/_stats_py.py:1522: RuntimeWarning: Precision loss occurred in moment calculation due to catastrophic cancellation. This occurs when the data are nearly identical. Results may be unreliable.
+  sk = skew(a, axis, bias=bias)
+/curie-home/zengjj/.conda/envs/renormalizer/lib/python3.8/site-packages/scipy/stats/_stats_py.py:1523: RuntimeWarning: Precision loss occurred in moment calculation due to catastrophic cancellation. This occurs when the data are nearly identical. Results may be unreliable.
+  kurt = kurtosis(a, axis, bias=bias)

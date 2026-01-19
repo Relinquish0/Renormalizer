@@ -33,6 +33,12 @@ def expm_krylov(Afunc, dt, vstart: xp.ndarray, block_size=50):
         M. Hochbruck and C. Lubich
         On Krylov subspace approximations to the matrix exponential operator
         SIAM J. Numer. Anal. 34, 1911 (1997)
+
+    Args:
+        Afunc: function that computes the matrix-vector product Ax for given x
+        dt: time step (can be complex)
+        vstart: starting vector (1D array)
+        block_size: size of the Krylov subspace
     """
     if not np.iscomplex(dt):
         dt = dt.real

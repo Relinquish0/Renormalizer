@@ -38,6 +38,8 @@ from renormalizer.utils import (
     EvolveMethod
 )
 
+from renormalizer.mps.backend import xp
+
 logger = logging.getLogger(__name__)
 
 class MsEvolveMethod(Enum):
@@ -139,10 +141,10 @@ class MultisetMps:
             raise ValueError(f"kind={kind} is not valid.")
 
 class MultisetModel:
-    def __init__(self, model: Model): 
+    def __init__(self, model: Model, max_bonddim): 
         self.model = model
         self.evolve_config: EvolveConfig = EvolveConfig(method=MsEvolveMethod.ms_evolve_tdvp_ps)
-        self.compress_config: CompressConfig  = CompressConfig(CompressCriteria.fixed, max_bonddim=32)
+        self.compress_config: CompressConfig  = CompressConfig(CompressCriteria.fixed, max_bonddim=max_bonddim)
         self.N_electron = self.model.ham_terms[-1].dofs[0] + 1 # This may consult bug!!! 
         self.basis_set = [item for item in self.model.basis if type(item).__name__ != 'BasisSimpleElectron'] # casting the electron terms
 
@@ -214,12 +216,11 @@ class MultisetModel:
             MsEvolveMethod.ms_evolve_tdvp_ps: self._ms_evolve_tdvp_ps
         }[self.evolve_config.method]
 
-        mps_alpha_next = []
+        msmps_next = []
 
-        new_mps = method(ms_mps_=self.MsMps,ms_mpo=self.MsMpo, evolve_dt=evolve_dt)
-        mps_alpha_next.append(new_mps)
-        self.MsMps.msmps= mps_alpha_next
-
+        new_msmps = method(ms_mps_=self.MsMps,ms_mpo=self.MsMpo, evolve_dt=evolve_dt)
+        msmps_next.append(new_msmps)
+        self.MsMps = new_msmps
         self.MsMps.ms_normalize("mps_only")
         # if normalize:
         #     if np.iscomplex(evolve_dt):
@@ -257,138 +258,182 @@ class MultisetModel:
             for imps in ms_mps.msmps[0].iter_idx_list(full=True): # All mps in msmps are same
                 
                     system = "L" if ms_mps.msmps[0].to_right else "R"
+                    shape_imps = list(ms_mps.msmps[0][imps].shape)
+                    dim = int(np.prod(shape_imps))
 
                     # Construt the sum of efficient Hamiltonian
+                    l_array_ab = [[[] for _ in range(self.N_electron)] for _ in range(self.N_electron)]                    
+                    r_array_ab = [[[] for _ in range(self.N_electron)] for _ in range(self.N_electron)]
                     hop_list = [[[] for _ in range(self.N_electron)] for _ in range(self.N_electron)]
                     for alpha in range(self.N_electron):
                         for beta in range(self.N_electron):
-                            l_array = Environ_list[alpha][beta].read("L", imps - 1)
-                            r_array = Environ_list[alpha][beta].read("R", imps + 1)
+                            l_array_ab[alpha][beta] = Environ_list[alpha][beta].read("L", imps - 1)
+                            r_array_ab[alpha][beta] = Environ_list[alpha][beta].read("R", imps + 1)
+                            hop_list[alpha][beta] = hop_expr(l_array_ab[alpha][beta], r_array_ab[alpha][beta], [asxp(ms_mpo.msmpo[alpha][beta][imps].array)], shape_imps)
 
-                            shape = list(ms_mps.msmps[alpha][imps].shape)
-                            hop_list[alpha][beta] = hop_expr(l_array, r_array, [asxp(ms_mpo.msmpo[alpha][beta][imps].array)], shape)
-                    print('*'*150)
-                    print(hop_list[0][0])
-                    print('*'*150)
+                    Y0 = xp.concatenate([asxp(ms_mps.msmps[a][imps].ravel().array) for a in range(self.N_electron)])
+                    
                     # Construct the partial differential equation of Multiset TDVP
                     if self.evolve_config.ivp_solver == "krylov":
-                        print(ms_mps.msmps[0][imps].ravel().array.shape)
+
                         mps_t, j = expm_krylov(
-                            lambda y: sum(hop_beta(y.reshape(shape)).ravel() for hop_beta in hop_list),
-                            -1j * evolve_dt / 2, mps_alpha[imps].ravel().array
-                        )
-                    else:
-                        sol = solve_ivp(
-                            lambda t, y: sum(hop_beta(y.reshape(shape)).ravel() for hop_beta in hop_list)/coef, # In this line "y:" is different from origin code
-                            (0, evolve_dt/2),
-                            mps_alpha[imps].ravel().array,
-                            method=self.evolve_config.ivp_solver,
-                            rtol=self.evolve_config.ivp_rtol,
-                            atol=self.evolve_config.ivp_atol,
-                        )
-                        mps_t, j = sol.y, sol.nfev
+                            lambda Y: xp.concatenate([sum(hop_list[a][b](Y.reshape(self.N_electron, dim)[b].reshape(shape_imps)).ravel()
+                            for b in range(self.N_electron))for a in range(self.N_electron)]),
+                            -1j * evolve_dt / 2, 
+                            Y0)
+                    # This part has not been changed yet.
+                    # else:
+                    #     sol = solve_ivp(
+                    #         lambda t, y: sum(hop_beta(y.reshape(shape)).ravel() for hop_beta in hop_list)/coef, # In this line "y:" is different from origin code
+                    #         (0, evolve_dt/2),
+                    #         mps_alpha[imps].ravel().array,
+                    #         method=self.evolve_config.ivp_solver,
+                    #         rtol=self.evolve_config.ivp_rtol,
+                    #         atol=self.evolve_config.ivp_atol,
+                    #     )
+                    #     mps_t, j = sol.y, sol.nfev
 
+                    mps_t = mps_t.reshape(self.N_electron, dim)
                     local_steps.append(j)
-                    mps_t = mps_t.reshape(shape)
 
-                    qnbigl, qnbigr, _ = mps_alpha._get_big_qn([imps])
-                    u, qnlset, v, qnrset = svd_qn.svd_qn(
-                        asnumpy(mps_t),
-                        qnbigl,
-                        qnbigr,
-                        mps_alpha.qntot,
-                        QR=True,
-                        system=system,
-                        full_matrices=False,
-                    )
-                    vt = v.T
+                    # SVD decomposition for each mps_alpha
+                    qnbigl, qnbigr, _ = ms_mps.msmps[0]._get_big_qn([imps])
+                    u_list = [[] for _ in range(self.N_electron)]
+                    vt_list = [[] for _ in range(self.N_electron)]
+                    for alpha in range(self.N_electron):
+                        u, qnlset, v, qnrset = svd_qn.svd_qn(
+                            asnumpy(mps_t[alpha]),
+                            qnbigl,
+                            qnbigr,
+                            ms_mps.msmps[0].qntot,
+                            QR=True,
+                            system=system,
+                            full_matrices=False,
+                        )
+                        u_list[alpha] = asxp(u)
+                        vt_list[alpha] = asxp(v.T)
 
-                    if not mps_alpha.to_right and imps != 0:
-                        mps_alpha[imps] = vt.reshape([-1] + shape[1:])
-                        mps_alpha.qn[imps] = qnrset
-                        mps_alpha.qnidx = imps-1
+                    if not ms_mps.msmps[0].to_right and imps != 0:
+                        for alpha in range(self.N_electron):
+                            ms_mps.msmps[alpha][imps] = vt_list[alpha].reshape([-1] + shape_imps[1:])
+                            ms_mps.msmps[alpha].qn[imps] = qnrset
+                            ms_mps.msmps[alpha].qnidx = imps-1
 
-                        shape_u = u.shape
-
+                        shapeU = list(u_list[0].shape)
+                        dimU = int(np.prod(shapeU))
                         # Construct hop_u list
-                        hop_u_list = []
-                        for beta in range(self.N_electron):
-                            l_array = Environ_beta_list[beta].read("L", imps - 1)
-                            r_array = Environ_beta_list[beta].read("R", imps + 1)
-                            r_array = (Environ_beta_list[beta].GetLR(
-                                "R", imps, ms_mps_beta.msmps[beta], ms_mpo.msmpo[alpha][beta], itensor=r_array, method="System", mps_conj=mps_alpha.conj()
-                            ))
-                            # reverse update u site
-                            hop_u_list.append(hop_expr(l_array, r_array, [], shape_u))
+                        hop_u_list = [[[] for _ in range(self.N_electron)] for _ in range(self.N_electron)]
+                        for alpha in range(self.N_electron):
+                            for beta in range(self.N_electron):
+                                r_array = Environ_list[alpha][beta].GetLR(
+                                    "R", imps, ms_mps.msmps[beta], ms_mpo.msmpo[alpha][beta], itensor=r_array_ab[alpha][beta], method="System", 
+                                    mps_conj=ms_mps.msmps[alpha].conj()
+                                )
+                                # reverse update u site
+                                hop_u_list[alpha][beta] = hop_expr(l_array_ab[alpha][beta], r_array, [], shapeU)
+
+                        U0 = xp.concatenate([u_list[alpha].ravel() for alpha in range(self.N_electron)])
 
                         if self.evolve_config.ivp_solver == "krylov":
-                            mps_t, j = expm_krylov(
-                                lambda y: sum(hop_u_beta(y.reshape(shape_u)).ravel() for hop_u_beta in hop_u_list),
-                                1j * evolve_dt / 2, u.ravel()
+                            Ut, j2 = expm_krylov(
+                                lambda Y: xp.concatenate([
+                                    sum(
+                                        hop_u_list[alpha][beta](Y.reshape(self.N_electron, dimU)[beta].reshape(shapeU)).ravel()
+                                        for beta in range(self.N_electron)
+                                    )
+                                    for alpha in range(self.N_electron)
+                                ]),
+                                1j * evolve_dt / 2,
+                                U0
                             )
-                        else:
-                            sol = solve_ivp(
-                                lambda t, y: sum(hop_u_beta(y.reshape(shape_u)).ravel() for hop_u_beta in hop_u_list)/ -coef,
-                                (0, evolve_dt/2),
-                                u.ravel(),
-                                method=self.evolve_config.ivp_solver,
-                                rtol=self.evolve_config.ivp_rtol,
-                                atol=self.evolve_config.ivp_atol,
+                        # This part has not been changed yet.
+                        # else:
+                        #     sol = solve_ivp(
+                        #         lambda t, y: sum(hop_u_beta(y.reshape(shape_u)).ravel() for hop_u_beta in hop_u_list)/ -coef,
+                        #         (0, evolve_dt/2),
+                        #         u.ravel(),
+                        #         method=self.evolve_config.ivp_solver,
+                        #         rtol=self.evolve_config.ivp_rtol,
+                        #         atol=self.evolve_config.ivp_atol,
+                        #     )
+                        #     mps_t, j = sol.y, sol.nfev
+
+                        local_steps.append(j2)
+                        Ut = Ut.reshape(self.N_electron, dimU)
+
+                        for alpha in range(self.N_electron):
+                            ms_mps.msmps[alpha][imps - 1] = tensordot(
+                                ms_mps.msmps[alpha][imps - 1].array,
+                                Ut[alpha].reshape(shapeU),
+                                axes=(-1, 0),
                             )
-                            mps_t, j = sol.y, sol.nfev
 
-                        local_steps.append(j)
-                        mps_t = mps_t.reshape(shape_u)
+                    elif ms_mps.msmps[0].to_right and imps != len(ms_mps.msmps[0]) - 1:
+                        for alpha in range(self.N_electron):
+                            ms_mps.msmps[alpha][imps] = u_list[alpha].reshape(shape_imps[:-1] + [-1])
+                            ms_mps.msmps[alpha].qn[imps + 1] = qnlset
+                            ms_mps.msmps[alpha].qnidx = imps+1
 
-                        mps_alpha[imps - 1] = tensordot(mps_alpha[imps - 1].array, mps_t, axes=(-1, 0),)
-
-                    elif mps_alpha.to_right and imps != len(mps_alpha) - 1:
-                        mps_alpha[imps] = u.reshape(shape[:-1] + [-1])
-                        mps_alpha.qn[imps + 1] = qnlset
-                        mps_alpha.qnidx = imps+1
-                        shape_svt = vt.shape
+                        shapeC = list(vt_list[0].shape)
+                        dimC = int(np.prod(shapeC))
 
                         # Construct hop_svt list
-                        hop_svt_list = []
-                        for beta in range(self.N_electron):
-                            l_array = Environ_beta_list[beta].read("L", imps - 1)
-                            r_array = Environ_beta_list[beta].read("R", imps + 1)
-                            l_array = (Environ_beta_list[beta].GetLR(
-                                "L", imps, ms_mps_beta.msmps[beta], ms_mpo.msmpo[alpha][beta], itensor=l_array, method="System", mps_conj=mps_alpha.conj()
-                            ))
-                            # reverse update svt site
-                            hop_svt_list.append(hop_expr(l_array, r_array, [], shape_svt))
+                        hop_svt_list = [[[] for _ in range(self.N_electron)] for _ in range(self.N_electron)]
+                        for alpha in range(self.N_electron):
+                            for beta in range(self.N_electron):
+                                l_array = (Environ_list[alpha][beta].GetLR(
+                                    "L", imps, ms_mps.msmps[beta], ms_mpo.msmpo[alpha][beta], itensor=l_array_ab[alpha][beta], method="System", 
+                                    mps_conj=ms_mps.msmps[alpha].conj()
+                                ))
+                                # reverse update svt site
+                                hop_svt_list[alpha][beta] = hop_expr(l_array, r_array_ab[alpha][beta], [], shapeC)
+                        
+                        C0 = xp.concatenate([vt_list[alpha].ravel() for alpha in range(self.N_electron)])
 
                         if self.evolve_config.ivp_solver == "krylov":
-                            mps_t, j = expm_krylov(
-                                lambda y: sum(hop_svt_beta(y.reshape(shape_svt)).ravel() for hop_svt_beta in hop_svt_list),
-                                1j * evolve_dt / 2, vt.ravel()
+                            Ct, j2 = expm_krylov(
+                                lambda Y: xp.concatenate([
+                                    sum(
+                                        hop_svt_list[alpha][beta](Y.reshape(self.N_electron, dimC)[beta].reshape(shapeC)).ravel()
+                                        for beta in range(self.N_electron)
+                                    )
+                                    for alpha in range(self.N_electron)
+                                ]),
+                                1j * evolve_dt / 2,
+                                C0
                             )
-                        else:
-                            sol = solve_ivp(
-                                lambda t, y: sum(hop_svt_beta(y.reshape(shape_svt)).ravel() for hop_svt_beta in hop_svt_list) / -coef,
-                                (0, evolve_dt/2),
-                                vt.ravel(),
-                                method=self.evolve_config.ivp_solver,
-                                rtol=self.evolve_config.ivp_rtol,
-                                atol=self.evolve_config.ivp_atol,
+                        # else:
+                        #     sol = solve_ivp(
+                        #         lambda t, y: sum(hop_svt_beta(y.reshape(shape_svt)).ravel() for hop_svt_beta in hop_svt_list) / -coef,
+                        #         (0, evolve_dt/2),
+                        #         vt.ravel(),
+                        #         method=self.evolve_config.ivp_solver,
+                        #         rtol=self.evolve_config.ivp_rtol,
+                        #         atol=self.evolve_config.ivp_atol,
+                        #     )
+                        #     mps_t, j = sol.y, sol.nfev
+
+                        local_steps.append(j2)
+                        Ct = Ct.reshape(self.N_electron, dimC)
+
+                        for alpha in range(self.N_electron):
+                            ms_mps.msmps[alpha][imps + 1] = tensordot(
+                                Ct[alpha].reshape(shapeC),
+                                ms_mps.msmps[alpha][imps + 1].array,
+                                axes=(1, 0),
                             )
-                            mps_t, j = sol.y, sol.nfev
-
-                        local_steps.append(j)
-                        mps_t = mps_t.reshape(shape_svt)
-
-                        mps_alpha[imps + 1] = tensordot(mps_t, mps_alpha[imps + 1].array, axes=(1, 0),)
 
                     else:
-                        mps_alpha[imps] = mps_t
-            mps_alpha._switch_direction()
+                        for alpha in range(self.N_electron):
+                            ms_mps.msmps[alpha][imps] = mps_t[alpha].reshape(shape_imps)
 
+            for alpha in range(self.N_electron):
+                ms_mps.msmps[alpha]._switch_direction()
         steps_stat = stats.describe(local_steps)
         logger.debug(f"TDVP-PS Krylov space: {steps_stat}")
-        mps_alpha.evolve_config.stat = steps_stat
+        self.evolve_config.stat = steps_stat
 
-        return mps_alpha
+        return ms_mps
 
     def fc_excitation(self,alpha:int):
         '''

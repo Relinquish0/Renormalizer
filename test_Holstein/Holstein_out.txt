@@ -1,0 +1,23 @@
+=== Environment Information ===
+/curie-home/zengjj/.conda/envs/renormalizer/bin/python
+Python 3.8.20
+nvcc: NVIDIA (R) Cuda compiler driver
+Copyright (c) 2005-2024 NVIDIA Corporation
+Built on Thu_Mar_28_02:18:24_PDT_2024
+Cuda compilation tools, release 12.4, V12.4.131
+Build cuda_12.4.r12.4/compiler.34097967_0
+===============================
+Starting
+2026-01-19 09:35:08,743 - INFO - 0th Inner product: [1.0000000000000001e-20, 1.0]
+2026-01-19 09:35:08,813 - INFO - 1th Inner product: [3.401241075122366e-05, 0.999965987589249]
+2026-01-19 09:35:08,852 - INFO - 2th Inner product: [0.00013603661163095953, 0.9998639633883687]
+2026-01-19 09:35:08,889 - INFO - 3th Inner product: [0.00030603352069461616, 0.9996939664793052]
+2026-01-19 09:35:08,929 - INFO - 4th Inner product: [0.0005439380419370936, 0.999456061958063]
+2026-01-19 09:35:08,965 - INFO - 5th Inner product: [0.0008496591260722217, 0.9991503408739275]
+2026-01-19 09:35:09,003 - INFO - 6th Inner product: [0.001223079855475372, 0.9987769201445245]
+2026-01-19 09:35:09,039 - INFO - 7th Inner product: [0.0016640575531411581, 0.998335942446859]
+2026-01-19 09:35:09,075 - INFO - 8th Inner product: [0.0021724239154665417, 0.9978275760845332]
+2026-01-19 09:35:09,111 - INFO - 9th Inner product: [0.0027479851686286025, 0.9972520148313712]
+Job completed with exit code: 0
+Ending
+===============================
