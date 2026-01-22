@@ -150,8 +150,18 @@ class MultisetModel:
 
         self.MsModel = [[[] for _ in range(self.N_electron)] for _ in range(self.N_electron)]
         self.MsOp = [[[] for _ in range(self.N_electron)] for _ in range(self.N_electron)]
+
+        for i in range(len(self.model.ham_terms)):
+            print(self.model.ham_terms[i])
+
         self.SplitHamTerm()
-                    
+
+        for i in range(self.N_electron):
+            for j in range(self.N_electron):
+                print("="*20,i,j,"="*20)
+                for k in range(len(self.MsOp[i][j])):
+                    print(self.MsOp[i][j][k])
+
         self.ConstructMsModel()
 
         self.MsMpo = MultisetMpo(self.MsModel,self.N_electron)
@@ -163,17 +173,14 @@ class MultisetModel:
     def SplitHamTerm(self):
         # Convert Hamiltonian from H to H^{\alpha,\beta} and storage in self.MsOp
         for i in range(len(self.model.ham_terms)):
-            if len(self.model.ham_terms[i].dofs) == 2:                
+            if len(self.model.ham_terms[i].dofs) == 2:             
                 self.MsOp[self.model.ham_terms[i].dofs[0]][self.model.ham_terms[i].dofs[1]].append(self._reset_all_MsOp(self.model.ham_terms[i]))
-            elif len(self.model.ham_terms[i].dofs) == 1:                
-                self.MsOp[self.model.ham_terms[i].dofs[0][0]][self.model.ham_terms[i].dofs[0][0]].append(self._reset_all_MsOp(self.model.ham_terms[i]))
+            elif len(self.model.ham_terms[i].dofs) == 1:
+                for alpha in range(self.N_electron):
+                    self.MsOp[alpha][alpha].append(self._reset_all_MsOp(self.model.ham_terms[i]))             
+                # self.MsOp[self.model.ham_terms[i].dofs[0][0]][self.model.ham_terms[i].dofs[0][0]].append(self._reset_all_MsOp(self.model.ham_terms[i]))
             else: # len(self.model.ham_terms[i].dofs) == 3
                 self.MsOp[self.model.ham_terms[i].dofs[0]][self.model.ham_terms[i].dofs[1]].append(self._reset_all_MsOp(self.model.ham_terms[i]))
-
-    def ConstructMsModel(self):
-        for i in range(self.N_electron):
-            for j in range(self.N_electron):
-                self.MsModel[i][j] = Model(basis=self.basis_set, ham_terms=self.MsOp[i][j])
 
     def _reset_all_MsOp(self, op:Op):
         # 1. Convert operator "a^\dagger a " to "I" and change the property of each Op
@@ -199,16 +206,19 @@ class MultisetModel:
             else:
                 new_split_symbol.append(new_op.split_symbol[i])
                 new_qn_list.append(new_op.qn_list[i])
-                if isinstance(new_op.dofs[i], tuple):
-                    new_dofs.append((0,)+new_op.dofs[i][1:])
-                else:
-                    new_dofs.append(new_op.dofs[i])
+
+                new_dofs.append(new_op.dofs[i])
                 i += 1
             
         new_op.split_symbol = new_split_symbol
         new_op.qn_list = new_qn_list
         new_op.dofs = new_dofs
         return new_op          
+
+    def ConstructMsModel(self):
+        for i in range(self.N_electron):
+            for j in range(self.N_electron):
+                self.MsModel[i][j] = Model(basis=self.basis_set, ham_terms=self.MsOp[i][j])
 
     def evolve(self, evolve_dt, normalize=True):
 
@@ -255,12 +265,11 @@ class MultisetModel:
         local_steps = []
         # sweep for 2 rounds
         for i in range(2):
-            for imps in ms_mps.msmps[0].iter_idx_list(full=True): # All mps in msmps are same
-                
+            for imps in ms_mps.msmps[0].iter_idx_list(full=True): # All mps in msmps are same             
                     system = "L" if ms_mps.msmps[0].to_right else "R"
                     shape_imps = list(ms_mps.msmps[0][imps].shape)
                     dim = int(np.prod(shape_imps))
-
+                    
                     # Construt the sum of efficient Hamiltonian
                     l_array_ab = [[[] for _ in range(self.N_electron)] for _ in range(self.N_electron)]                    
                     r_array_ab = [[[] for _ in range(self.N_electron)] for _ in range(self.N_electron)]
@@ -272,7 +281,7 @@ class MultisetModel:
                             hop_list[alpha][beta] = hop_expr(l_array_ab[alpha][beta], r_array_ab[alpha][beta], [asxp(ms_mpo.msmpo[alpha][beta][imps].array)], shape_imps)
 
                     Y0 = xp.concatenate([asxp(ms_mps.msmps[a][imps].ravel().array) for a in range(self.N_electron)])
-                    
+
                     # Construct the partial differential equation of Multiset TDVP
                     if self.evolve_config.ivp_solver == "krylov":
 
@@ -429,9 +438,9 @@ class MultisetModel:
 
             for alpha in range(self.N_electron):
                 ms_mps.msmps[alpha]._switch_direction()
-        steps_stat = stats.describe(local_steps)
-        logger.debug(f"TDVP-PS Krylov space: {steps_stat}")
-        self.evolve_config.stat = steps_stat
+        # steps_stat = stats.describe(local_steps)
+        # logger.debug(f"TDVP-PS Krylov space: {steps_stat}")
+        # self.evolve_config.stat = steps_stat
 
         return ms_mps
 
@@ -462,12 +471,16 @@ class MultisetModel:
             self.MsMps.msmps[alpha] = self.MsMps.msmps[alpha].expand_bond_dimension() # Now is random expanded   
 
         self.fc_excitation(self.N_electron // 2)      
+        energy = Quantity(self.Hamiltonian())
 
         for alpha in range(self.N_electron):
             for beta in range(self.N_electron):
-                tentative_mpo = self.MsMpo.msmpo[alpha][beta]
-                energy = Quantity(self.MsMps.msmps[beta].expectation(mpo = tentative_mpo, self_conj = self.MsMps.msmps[alpha]))
-                self.MsMpo.msmpo[alpha][beta] = Mpo(model = self.MsModel[alpha][beta], terms = None, offset = Quantity(0))
+                # tentative_mpo = self.MsMpo.msmpo[alpha][beta]
+
+                if alpha == beta:
+                    self.MsMpo.msmpo[alpha][beta] = Mpo(model = self.MsModel[alpha][beta], terms = None, offset = energy)
+                else:
+                    self.MsMpo.msmpo[alpha][beta] = Mpo(model = self.MsModel[alpha][beta], terms = None, offset = Quantity(0))
 
         for alpha in range(self.N_electron):
             self.MsMps.msmps[alpha].canonicalise() # seem to make no sense  
@@ -477,12 +490,46 @@ class MultisetModel:
         # strategy: by computing <\Psi^\alpha|\Psi^\alpha>
         population = []
         for alpha in range(self.N_electron):
-            population.append(self.MsMps.msmps[alpha].conj().dot(self.MsMps.msmps[alpha]).real)
+            population.append(self.decoherence_metrics()[2][alpha,alpha].real)
         return population
 
-    def Hamiltonian(self) -> "float":
-        return self.MsMps.total_mps().expectation(self.MsMpo.total_mpo())
-    
+    # def Hamiltonian(self) -> "float":
+    #     return self.MsMps.total_mps().expectation(self.MsMpo.total_mpo())
+
+    def Hamiltonian(self):
+        # <Psi|H|Psi> / <Psi|Psi>
+        num = 0.0
+        for alpha in range(self.N_electron):
+            for beta in range(self.N_electron):
+                num += self.MsMps.msmps[beta].expectation(
+                    mpo=self.MsMpo.msmpo[alpha][beta],
+                    self_conj=self.MsMps.msmps[alpha].conj()
+                )
+        den = sum(self.MsMps.msmps[a].conj().dot(self.MsMps.msmps[a]) for a in range(self.N_electron))
+        return (num / den).real
+
+    def rho_el(self):
+        """Electronic reduced density matrix rho_{ab} = <Psi^a|Psi^b>."""
+        Ne = self.N_electron
+        rho = np.zeros((Ne, Ne), dtype=np.complex128)
+        for a in range(Ne):
+            bra = self.MsMps.msmps[a].conj()
+            for b in range(Ne):
+                rho[a, b] = bra.dot(self.MsMps.msmps[b])
+        return rho
+
+    def decoherence_metrics(self):
+        """
+        Return (trace, purity, entropy, rho_el).
+        purity = Tr(rho^2), entropy = -Tr(rho log rho) (natural log).
+        """
+        rho = self.rho_el()
+
+        tr = np.trace(rho).real
+        purity = np.trace(rho @ rho).real
+
+        return tr, purity, rho
+
     def Inner_product(self) -> "float":
         return self.MsMps.total_mps().conj().dot(self.MsMps.total_mps())
 

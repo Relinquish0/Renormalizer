@@ -1296,6 +1296,18 @@ class Mps(MatrixProduct):
                 shape = list(mps[imps].shape)
                 hop = hop_expr(l_array, r_array, [asxp(mpo[imps].array)], shape)
 
+                Afunc = lambda y: hop(y.reshape(shape)).ravel()
+                # ===== 在这里插入厄米性检查（建议只在少数几个 site/step 做一次）=====
+                if i == 0 and imps == 0:   # 只检查一次，避免太慢
+                    x = xp.random.random(mps[imps].ravel().array.shape) + 1j * xp.random.random(mps[imps].ravel().array.shape)
+                    y = xp.random.random(mps[imps].ravel().array.shape) + 1j * xp.random.random(mps[imps].ravel().array.shape)
+                    x = x.astype(mps[imps].ravel().array.dtype, copy=False)
+                    y = y.astype(mps[imps].ravel().array.dtype, copy=False)
+
+                    lhs = xp.vdot(x, Afunc(y))
+                    rhs = xp.vdot(Afunc(x), y)
+                    print("Hermiticity check |<x,Ay>-<Ax,y>| =", float(xp.abs(lhs - rhs)))
+                    # ====================================================================================================                
                 if self.evolve_config.ivp_solver == "krylov":
                     mps_t, j = expm_krylov(
                         lambda y: hop(y.reshape(shape)).ravel(),

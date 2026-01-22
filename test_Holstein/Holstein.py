@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 
+from renormalizer.mps.backend import USE_GPU, xp
 import logging
 import json
 from renormalizer import Model, Mps, Mpo, optimize_mps
@@ -25,13 +26,16 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 
+import pandas as pd
+from datetime import datetime
+
 with open("/curie-home/zengjj/Renormalizer/example/fmo_sdf.json") as fin:
     # a 107*2 matrix
     sdf_values = json.load(fin)
 sdf_values = np.array(sdf_values)
 
-j_matrix_cm = np.array([[10, 8],
-                        [2, 1],])
+j_matrix_cm = np.array([[1, 800],
+                        [800, 100],])
 
 N_PHONONS = 2
 
@@ -59,11 +63,22 @@ if __name__ == "__main__":
     # starts from 1
     mol_arangement = np.array([1,2]) - 1
     model = HolsteinModel(list(np.array(mlist)[mol_arangement]), j_matrix_au[mol_arangement][:, mol_arangement], )
+    
+    max_bonddim = 4
+    evolve_dt = 160
+    multisetmodel = MultisetModel(model=model, max_bonddim=max_bonddim)
 
-    multisetmodel = MultisetModel(model=model, max_bonddim=4)
-    for i in range(10):
-        logger.info("%dth Inner product: %s", i, multisetmodel.popultation())
-        multisetmodel.evolve(160)
+    from renormalizer.mps.backend import USE_GPU, xp  
+    print(f"GPU enabled: {USE_GPU}")  
+    print(f"Backend: {'CuPy' if USE_GPU else 'NumPy'}")
+
+    populations = []
+    for i in range(100):
+        logger.info("%d population: %s Hamiltonian: %s", i, multisetmodel.popultation(), multisetmodel.Hamiltonian())
+        populations.append(multisetmodel.popultation())
+        multisetmodel.evolve(evolve_dt=evolve_dt)
+    # pd.DataFrame(populations).to_excel(datetime.now().strftime("%Y-%m-%d-%H:%M_Holstein") + str(max_bonddim) +'bd_' + str(evolve_dt) + "t.xlsx",
+    #                         index=False, header=False)
     '''
 
     evolve_dt = 160
@@ -73,10 +88,11 @@ if __name__ == "__main__":
 
     ct = ChargeDiffusionDynamics(model, evolve_config=evolve_config, compress_config=compress_config, init_electron=InitElectron.fc)
     ct.dump_dir = "./"
-    ct.job_name = 'Holstein'
+    ct.job_name = 'Holstein_benchmark'
     ct.stop_at_edge = False
-    ct.evolve(evolve_dt=evolve_dt, evolve_time=1600)
+    ct.evolve(evolve_dt=evolve_dt, evolve_time=2000)
     ''' 
+    
 
 
 

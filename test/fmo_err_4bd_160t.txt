@@ -1,0 +1,5 @@
+2026-01-22 17:15:28,794[INFO] Use NumPy as backend
+2026-01-22 17:15:28,794[INFO] numpy random seed is 9012
+2026-01-22 17:15:28,794[INFO] random seed is 1092
+2026-01-22 17:15:28,922[INFO] Git Commit Hash: de0bc33e90ccd6b3f210e578524c33e9c30054bf
+2026-01-22 17:15:28,922[INFO] use 64 bits

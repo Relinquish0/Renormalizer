@@ -23,6 +23,9 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 
+import pandas as pd
+from datetime import datetime
+
 with open("/curie-home/zengjj/Renormalizer/example/fmo_sdf.json") as fin:
     # a 107*2 matrix
     sdf_values = json.load(fin)
@@ -63,12 +66,22 @@ if __name__ == "__main__":
     # starts from 1
     mol_arangement = np.array([7, 5, 3, 1, 2, 4, 6]) - 1
     model = HolsteinModel(list(np.array(mlist)[mol_arangement]), j_matrix_au[mol_arangement][:, mol_arangement], )
-    multisetmodel = MultisetModel(model, max_bonddim=8)
 
-    for i in range(250):
-        multisetmodel.evolve(80)
-        logger.info("%dth Inner product: %s", i, multisetmodel.popultation())
-        print("%dth Inner product: %s", i, multisetmodel.popultation())
+    max_bonddim = 4
+    evolve_dt = 160
+    multisetmodel = MultisetModel(model, max_bonddim=max_bonddim)
+
+    print(f"GPU enabled: {USE_GPU}")  
+    print(f"Backend: {'CuPy' if USE_GPU else 'NumPy'}")
+    
+    populations = []
+    for i in range(125):
+        logger.info("%dth population: %s", i, multisetmodel.popultation())
+        populations.append(multisetmodel.popultation())
+        multisetmodel.evolve(evolve_dt=evolve_dt)
+
+    pd.DataFrame(populations).to_excel(datetime.now().strftime("%Y-%m-%d-%H%M_FMO") + str(max_bonddim) +'bd_' + str(evolve_dt) + "t.xlsx",
+                            index=False, header=False)    
 
 
     '''
