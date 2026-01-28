@@ -1,6 +1,0 @@
-2026-01-22 18:52:11,696[INFO] Using GPU: 0
-2026-01-22 18:52:11,697[INFO] Use CuPy as backend
-2026-01-22 18:52:11,697[INFO] cupy random seed is 2019
-2026-01-22 18:52:11,697[INFO] random seed is 1092
-2026-01-22 18:52:11,846[INFO] Git Commit Hash: de0bc33e90ccd6b3f210e578524c33e9c30054bf
-2026-01-22 18:52:11,846[INFO] use 64 bits

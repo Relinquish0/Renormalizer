@@ -69,19 +69,22 @@ if __name__ == "__main__":
 
     max_bonddim = 4
     evolve_dt = 160
+    logger.info("maximum bond dimension:%d, evolve time step:%d", max_bonddim, evolve_dt)
     multisetmodel = MultisetModel(model, max_bonddim=max_bonddim)
 
-    print(f"GPU enabled: {USE_GPU}")  
-    print(f"Backend: {'CuPy' if USE_GPU else 'NumPy'}")
-    
+    from renormalizer.mps.backend import USE_GPU, xp  
+    logger.info(f"GPU enabled: {USE_GPU}")  
+    logger.info(f"Backend: {'CuPy' if USE_GPU else 'NumPy'}")
+
     populations = []
-    for i in range(125):
-        logger.info("%dth population: %s", i, multisetmodel.popultation())
-        populations.append(multisetmodel.popultation())
+    for i in range(10):
+        population = multisetmodel.popultation()
+        logger.info("%dth population: %s", i, population)
+        populations.append(population)
         multisetmodel.evolve(evolve_dt=evolve_dt)
 
-    pd.DataFrame(populations).to_excel(datetime.now().strftime("%Y-%m-%d-%H%M_FMO") + str(max_bonddim) +'bd_' + str(evolve_dt) + "t.xlsx",
-                            index=False, header=False)    
+    # pd.DataFrame(populations).to_excel(datetime.now().strftime("%Y-%m-%d-%H%M_FMO") + str(max_bonddim) +'bd_' + str(evolve_dt) + "t.xlsx",
+    #                         index=False, header=False)    
 
 
     '''

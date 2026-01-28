@@ -66,14 +66,15 @@ if __name__ == "__main__":
     
     max_bonddim = 4
     evolve_dt = 160
+    logger.info("maximum bond dimension:%d, evolve time step:%d", max_bonddim, evolve_dt)
     multisetmodel = MultisetModel(model=model, max_bonddim=max_bonddim)
 
-    from renormalizer.mps.backend import USE_GPU, xp  
     print(f"GPU enabled: {USE_GPU}")  
     print(f"Backend: {'CuPy' if USE_GPU else 'NumPy'}")
-
+    
     populations = []
-    for i in range(100):
+
+    for i in range(1):
         logger.info("%d population: %s Hamiltonian: %s", i, multisetmodel.popultation(), multisetmodel.Hamiltonian())
         populations.append(multisetmodel.popultation())
         multisetmodel.evolve(evolve_dt=evolve_dt)

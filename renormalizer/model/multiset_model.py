@@ -39,6 +39,7 @@ from renormalizer.utils import (
 )
 
 from renormalizer.mps.backend import xp
+from concurrent.futures import ThreadPoolExecutor
 
 logger = logging.getLogger(__name__)
 
@@ -151,23 +152,22 @@ class MultisetModel:
         self.MsModel = [[[] for _ in range(self.N_electron)] for _ in range(self.N_electron)]
         self.MsOp = [[[] for _ in range(self.N_electron)] for _ in range(self.N_electron)]
 
-        for i in range(len(self.model.ham_terms)):
-            print(self.model.ham_terms[i])
+        # for i in range(len(self.model.ham_terms)):
+        #     print(self.model.ham_terms[i])
 
         self.SplitHamTerm()
 
-        for i in range(self.N_electron):
-            for j in range(self.N_electron):
-                print("="*20,i,j,"="*20)
-                for k in range(len(self.MsOp[i][j])):
-                    print(self.MsOp[i][j][k])
+        # for i in range(self.N_electron):
+        #     for j in range(self.N_electron):
+        #         print("="*20,i,j,"="*20)
+        #         for k in range(len(self.MsOp[i][j])):
+        #             print(self.MsOp[i][j][k])
 
         self.ConstructMsModel()
 
         self.MsMpo = MultisetMpo(self.MsModel,self.N_electron)
         self.MsMps = MultisetMps(self.MsModel,self.N_electron)
         self.MsMps.ms_normalize("mps_only")
-
         self.cdd_init_mps()
 
     def SplitHamTerm(self):
@@ -226,10 +226,7 @@ class MultisetModel:
             MsEvolveMethod.ms_evolve_tdvp_ps: self._ms_evolve_tdvp_ps
         }[self.evolve_config.method]
 
-        msmps_next = []
-
         new_msmps = method(ms_mps_=self.MsMps,ms_mpo=self.MsMpo, evolve_dt=evolve_dt)
-        msmps_next.append(new_msmps)
         self.MsMps = new_msmps
         self.MsMps.ms_normalize("mps_only")
         # if normalize:
@@ -333,10 +330,12 @@ class MultisetModel:
                         # Construct hop_u list
                         hop_u_list = [[[] for _ in range(self.N_electron)] for _ in range(self.N_electron)]
                         for alpha in range(self.N_electron):
+                            mps_conj_alpha = [None] * len(ms_mps.msmps[alpha])
+                            mps_conj_alpha[imps] = ms_mps.msmps[alpha][imps].conj()
                             for beta in range(self.N_electron):
                                 r_array = Environ_list[alpha][beta].GetLR(
                                     "R", imps, ms_mps.msmps[beta], ms_mpo.msmpo[alpha][beta], itensor=r_array_ab[alpha][beta], method="System", 
-                                    mps_conj=ms_mps.msmps[alpha].conj()
+                                    mps_conj=mps_conj_alpha
                                 )
                                 # reverse update u site
                                 hop_u_list[alpha][beta] = hop_expr(l_array_ab[alpha][beta], r_array, [], shapeU)
@@ -389,10 +388,12 @@ class MultisetModel:
                         # Construct hop_svt list
                         hop_svt_list = [[[] for _ in range(self.N_electron)] for _ in range(self.N_electron)]
                         for alpha in range(self.N_electron):
+                            mps_conj_alpha = [None] * len(ms_mps.msmps[alpha])
+                            mps_conj_alpha[imps] = ms_mps.msmps[alpha][imps].conj()
                             for beta in range(self.N_electron):
                                 l_array = (Environ_list[alpha][beta].GetLR(
                                     "L", imps, ms_mps.msmps[beta], ms_mpo.msmpo[alpha][beta], itensor=l_array_ab[alpha][beta], method="System", 
-                                    mps_conj=ms_mps.msmps[alpha].conj()
+                                    mps_conj=mps_conj_alpha
                                 ))
                                 # reverse update svt site
                                 hop_svt_list[alpha][beta] = hop_expr(l_array, r_array_ab[alpha][beta], [], shapeC)
@@ -435,13 +436,12 @@ class MultisetModel:
                     else:
                         for alpha in range(self.N_electron):
                             ms_mps.msmps[alpha][imps] = mps_t[alpha].reshape(shape_imps)
-
             for alpha in range(self.N_electron):
                 ms_mps.msmps[alpha]._switch_direction()
         # steps_stat = stats.describe(local_steps)
         # logger.debug(f"TDVP-PS Krylov space: {steps_stat}")
         # self.evolve_config.stat = steps_stat
-
+        
         return ms_mps
 
     def fc_excitation(self,alpha:int):
@@ -488,10 +488,8 @@ class MultisetModel:
 
     def popultation(self):
         # strategy: by computing <\Psi^\alpha|\Psi^\alpha>
-        population = []
-        for alpha in range(self.N_electron):
-            population.append(self.decoherence_metrics()[2][alpha,alpha].real)
-        return population
+        bras = [self.MsMps.msmps[a].conj() for a in range(self.N_electron)]
+        return [bras[a].dot(self.MsMps.msmps[a]).real for a in range(self.N_electron)]
 
     # def Hamiltonian(self) -> "float":
     #     return self.MsMps.total_mps().expectation(self.MsMpo.total_mpo())
