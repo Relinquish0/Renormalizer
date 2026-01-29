@@ -7,6 +7,7 @@ from collections import Counter
 from enum import Enum
 
 import numpy as np
+# import cupy as cp
 from scipy import stats
 
 from renormalizer.model.model import Model
@@ -40,6 +41,7 @@ from renormalizer.utils import (
 
 from renormalizer.mps.backend import xp
 from concurrent.futures import ThreadPoolExecutor
+from mpi4py import MPI
 
 logger = logging.getLogger(__name__)
 
@@ -143,10 +145,21 @@ class MultisetMps:
 
 class MultisetModel:
     def __init__(self, model: Model, max_bonddim): 
+
         self.model = model
         self.evolve_config: EvolveConfig = EvolveConfig(method=MsEvolveMethod.ms_evolve_tdvp_ps)
         self.compress_config: CompressConfig  = CompressConfig(CompressCriteria.fixed, max_bonddim=max_bonddim)
+
         self.N_electron = self.model.ham_terms[-1].dofs[0] + 1 # This may consult bug!!! 
+
+        self.comm = MPI.COMM_WORLD
+        self.rank = self.comm.Get_rank()
+        self.size = self.comm.Get_size()
+
+        # 将 alpha 块分配给各 rank（按 alpha 维度切分最简单）
+        self._alpha_blocks = np.array_split(np.arange(self.N_electron), self.size)
+        self._local_alphas = self._alpha_blocks[self.rank]
+
         self.basis_set = [item for item in self.model.basis if type(item).__name__ != 'BasisSimpleElectron'] # casting the electron terms
 
         self.MsModel = [[[] for _ in range(self.N_electron)] for _ in range(self.N_electron)]
@@ -283,8 +296,7 @@ class MultisetModel:
                     if self.evolve_config.ivp_solver == "krylov":
 
                         mps_t, j = expm_krylov(
-                            lambda Y: xp.concatenate([sum(hop_list[a][b](Y.reshape(self.N_electron, dim)[b].reshape(shape_imps)).ravel()
-                            for b in range(self.N_electron))for a in range(self.N_electron)]),
+                            lambda Y: self._apply_block_operator_mpi_cpu(Y, hop_list, dim, shape_imps),
                             -1j * evolve_dt / 2, 
                             Y0)
                     # This part has not been changed yet.
@@ -344,13 +356,7 @@ class MultisetModel:
 
                         if self.evolve_config.ivp_solver == "krylov":
                             Ut, j2 = expm_krylov(
-                                lambda Y: xp.concatenate([
-                                    sum(
-                                        hop_u_list[alpha][beta](Y.reshape(self.N_electron, dimU)[beta].reshape(shapeU)).ravel()
-                                        for beta in range(self.N_electron)
-                                    )
-                                    for alpha in range(self.N_electron)
-                                ]),
+                                lambda Y: self._apply_block_operator_mpi_cpu(Y, hop_u_list, dimU, shapeU),
                                 1j * evolve_dt / 2,
                                 U0
                             )
@@ -402,13 +408,7 @@ class MultisetModel:
 
                         if self.evolve_config.ivp_solver == "krylov":
                             Ct, j2 = expm_krylov(
-                                lambda Y: xp.concatenate([
-                                    sum(
-                                        hop_svt_list[alpha][beta](Y.reshape(self.N_electron, dimC)[beta].reshape(shapeC)).ravel()
-                                        for beta in range(self.N_electron)
-                                    )
-                                    for alpha in range(self.N_electron)
-                                ]),
+                                lambda Y: self._apply_block_operator_mpi_cpu(Y, hop_svt_list, dimC, shapeC),
                                 1j * evolve_dt / 2,
                                 C0
                             )
@@ -566,4 +566,121 @@ class MultisetModel:
                 tensor = environ2.read(key[0], key[1])  
                 result.write(key[0], key[1], tensor.copy())  
         
-        return result
+        return result   
+    
+    def _apply_block_operator(self, Y, op_list, block_dim, block_shape):
+        """
+        Args:
+            Y: The one-site wavefunction block (flattened)
+            op_list: effective Hamiltonian operators list
+            block_dim: 
+            block_shape: 
+        Returns:
+            The IVP after applying the effective Hamiltonian
+        """
+        
+        return xp.concatenate([
+            sum(
+                op_list[alpha][beta](
+                    Y.reshape(self.N_electron, block_dim)[beta].reshape(block_shape)
+                ).ravel()
+                for beta in range(self.N_electron)
+            )
+            for alpha in range(self.N_electron)
+        ]) 
+
+    def _apply_block_operator_GPUparallel(self, Y, op_list, block_dim, block_shape):
+        """
+        针对 GPU (CuPy) 的单卡极致优化版本。
+        策略：
+        1. 预分配显存，消除 concatenate 和 sum 产生的中间内存开销。
+        2. 原位(In-place)累加，最大化利用 GPU 显存带宽。
+        3. 避免跨卡通信，确保所有运算都在同一张卡的高速缓存中完成。
+        """
+        # 1. 确保 Y 是 CuPy 数组 (如果是 NumPy 数组会在这里被传输到 GPU)
+        # 并提前 reshape，避免在循环内重复创建 view
+        Y_gpu = xp.asarray(Y)
+        Y_reshaped = Y_gpu.reshape(self.N_electron, block_dim)
+
+        # 2. 预分配结果显存 (Pre-allocation)
+        # 直接申请最终大小的矩阵，避免最后使用 concatenate
+        # shape: (N_electron, block_dim)
+        output_buffer = xp.zeros((self.N_electron, block_dim), dtype=Y_gpu.dtype)
+
+        # 3. 执行计算
+        # 虽然这里是 Python 循环，但因为内部运算是 GPU 密集型的张量收缩，
+        # 这种写法的开销远小于跨卡通信的延迟。
+        for alpha in range(self.N_electron):
+            # 取出当前 alpha 对应的结果行引用
+            # 这一步不会复制数据，只是一个 view
+            row_view = output_buffer[alpha]
+            
+            # 针对当前行，累加所有 beta 列的贡献
+            for beta in range(self.N_electron):
+                # 获取 beta 对应的波函数块
+                y_beta = Y_reshaped[beta].reshape(block_shape)
+                
+                # 执行张量收缩
+                # op_list[alpha][beta] 是预编译好的 opt_einsum 表达式
+                contracted = op_list[alpha][beta](y_beta)
+                
+                # 【关键优化】原位累加 (In-place Addition)
+                # 避免了 sum() 函数创建新的临时数组对象
+                # .ravel() 通常返回 view，如果 copy 发生，开销也很小
+                row_view += contracted.ravel()
+
+        # 4. 返回打平的结果
+        # 此时结果已经在 GPU 上，直接返回即可
+        return output_buffer.ravel()
+
+    def _apply_block_operator_mpi_cpu(self, Y, hop_list, dim, shape):
+        """
+        并行计算 out = Heff @ Y，其中
+        Y = [vec(A^0), vec(A^1), ..., vec(A^{Ne-1})]
+        并行策略：按 alpha 分块；每个 rank 只算 local_alphas 的输出块，
+        再用 Allgatherv 拼回完整 out。
+        """
+        comm = self.comm
+        Ne = self.N_electron
+
+        # mpi4py 通信用 numpy 最稳
+        Y_np = asnumpy(Y).reshape(Ne, dim)
+
+        # 本 rank 负责的 alpha
+        local_alphas = self._local_alphas
+        local_nalpha = len(local_alphas)
+
+        # 计算本地输出块 (local_nalpha, dim)
+        out_local = np.zeros((local_nalpha, dim), dtype=Y_np.dtype)
+
+        for ia, a in enumerate(local_alphas):
+            acc = None
+            for b in range(Ne):
+                # hop_list[a][b] 需要 xp array 输入
+                tmp = hop_list[a][b](asxp(Y_np[b].reshape(shape))).ravel()
+                if acc is None:
+                    acc = tmp
+                else:
+                    acc = acc + tmp
+            out_local[ia] = asnumpy(acc)
+
+        # --- Allgatherv 拼回完整向量 out_full ---
+        # counts/displs 取决于 dim（不同 matvec dim 可能不同），所以这里现算
+        counts = np.array([len(bl) * dim for bl in self._alpha_blocks], dtype=np.int32)
+        displs = np.concatenate([[0], np.cumsum(counts[:-1])]).astype(np.int32)
+
+        out_full = np.empty(Ne * dim, dtype=out_local.dtype)
+
+        # 选择 MPI datatype
+        if out_full.dtype == np.complex128:
+            mpi_dtype = MPI.DOUBLE_COMPLEX
+        elif out_full.dtype == np.complex64:
+            mpi_dtype = MPI.COMPLEX
+        elif out_full.dtype == np.float64:
+            mpi_dtype = MPI.DOUBLE
+        else:
+            raise TypeError(f"Unsupported dtype for MPI: {out_full.dtype}")
+
+        comm.Allgatherv(out_local.ravel(), [out_full, counts, displs, mpi_dtype])
+
+        return asxp(out_full)
