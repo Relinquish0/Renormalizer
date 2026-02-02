@@ -5,8 +5,8 @@
 #SBATCH --gpus-per-node=1   # Specify the GPUs-per-node
 #SBATCH -p 4A100,4V100
 #SBATCH --qos=normal          # Depending on your needs
-#SBATCH --output=Holstein_out.txt
-#SBATCH --error=Holstein_err.txt
+#SBATCH --output=Holstein_out.log
+#SBATCH --error=Holstein_err.log
 
 # Below are executing commands
 nvidia-smi dmon -s pucvmte -o T > nvdmon_job-$SLURM_JOB_ID.log &

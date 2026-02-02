@@ -1,6 +1,0 @@
-/var/spool/slurmd/job30234/slurm_script: line 10: nvidia-smi: command not found
-2026-01-26 10:05:35,764[INFO] Use NumPy as backend
-2026-01-26 10:05:35,764[INFO] numpy random seed is 9012
-2026-01-26 10:05:35,764[INFO] random seed is 1092
-2026-01-26 10:05:35,797[INFO] Git Commit Hash: d3ee1bfc7959cbf8c266348697f6758e151c953c
-2026-01-26 10:05:35,798[INFO] use 64 bits

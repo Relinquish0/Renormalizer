@@ -1,12 +1,12 @@
 #!/bin/bash
-#SBATCH --job-name=fmo_4bd_160t
+#SBATCH --job-name=fmo_528bd_stream
 #SBATCH --nodes=1
 #SBATCH --ntasks=1         # Nodes * GPUs-per-node * Ranks-per-GPU
 #SBATCH --gpus-per-node=1   # Specify the GPUs-per-node
 #SBATCH -p 4V100
 #SBATCH --qos=normal          # Depending on your needs
-#SBATCH --output=fmo_out_4bd_160t.txt
-#SBATCH --error=fmo_err_4bd_160t.txt
+#SBATCH --output=fmo_out_528bd_stream.log
+#SBATCH --error=fmo_err_528bd_stream.log
 
 # Below are executing commands
 nvidia-smi dmon -s pucvmte -o T > nvdmon_job-$SLURM_JOB_ID.log &

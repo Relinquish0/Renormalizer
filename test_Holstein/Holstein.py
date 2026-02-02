@@ -14,17 +14,8 @@ import numpy as np
 
 from renormalizer.model.multiset_model import MultisetModel
 
-log.init_log(logging.INFO)
+from renormalizer.utils.log import package_logger as logger
 import sys
-
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[logging.StreamHandler(sys.stdout)],
-    force=True
-)
-
-logger = logging.getLogger(__name__)
 
 import pandas as pd
 from datetime import datetime
@@ -74,7 +65,7 @@ if __name__ == "__main__":
     
     populations = []
 
-    for i in range(1):
+    for i in range(10):
         logger.info("%d population: %s Hamiltonian: %s", i, multisetmodel.popultation(), multisetmodel.Hamiltonian())
         populations.append(multisetmodel.popultation())
         multisetmodel.evolve(evolve_dt=evolve_dt)

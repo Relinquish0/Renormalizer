@@ -11,17 +11,8 @@ from renormalizer.transport import ChargeDiffusionDynamics, InitElectron
 from renormalizer.model.multiset_model import MultisetModel
 import numpy as np
 
-log.init_log(logging.INFO)
 import sys
-
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[logging.StreamHandler(sys.stdout)],
-    force=True
-)
-
-logger = logging.getLogger(__name__)
+from renormalizer.utils.log import package_logger as logger
 
 import pandas as pd
 from datetime import datetime
@@ -67,17 +58,18 @@ if __name__ == "__main__":
     mol_arangement = np.array([7, 5, 3, 1, 2, 4, 6]) - 1
     model = HolsteinModel(list(np.array(mlist)[mol_arangement]), j_matrix_au[mol_arangement][:, mol_arangement], )
 
-    max_bonddim = 4
+    max_bonddim = 528
     evolve_dt = 160
-    logger.info("maximum bond dimension:%d, evolve time step:%d", max_bonddim, evolve_dt)
     multisetmodel = MultisetModel(model, max_bonddim=max_bonddim)
 
     from renormalizer.mps.backend import USE_GPU, xp  
     logger.info(f"GPU enabled: {USE_GPU}")  
     logger.info(f"Backend: {'CuPy' if USE_GPU else 'NumPy'}")
+    logger.info("maximum bond dimension:%d, evolve time step:%d", max_bonddim, evolve_dt)
 
     populations = []
     for i in range(10):
+
         population = multisetmodel.popultation()
         logger.info("%dth population: %s", i, population)
         populations.append(population)

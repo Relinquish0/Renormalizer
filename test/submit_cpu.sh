@@ -1,10 +1,10 @@
 #!/bin/bash
-#SBATCH --job-name=fmo_4bd_160t
+#SBATCH --job-name=fmo_cpu_benchmark
 #SBATCH --nodes=1
 #SBATCH --ntasks=16         # Nodes * GPUs-per-node * Ranks-per-GPU
 #SBATCH --qos=normal          # Depending on your needs
-#SBATCH --output=fmo_out_4bd_160t_cpu.txt
-#SBATCH --error=fmo_err_4bd_160t_cpu.txt
+#SBATCH --output=fmo_out_cpu_benchmark.log
+#SBATCH --error=fmo_err_cpu_benchmark.log
 
 # Below are executing commands
 nvidia-smi dmon -s pucvmte -o T > nvdmon_job-$SLURM_JOB_ID.log &
@@ -26,7 +26,7 @@ echo "==============================="
 
 # 运行主要的Python任务
 echo "Starting"
-python fmo.py 
+python /curie-home/zengjj/Renormalizer/example/fmo.py
 echo "Job completed with exit code: $?"
 
 echo "Ending"
