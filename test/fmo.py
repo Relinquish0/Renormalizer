@@ -58,11 +58,12 @@ if __name__ == "__main__":
     mol_arangement = np.array([7, 5, 3, 1, 2, 4, 6]) - 1
     model = HolsteinModel(list(np.array(mlist)[mol_arangement]), j_matrix_au[mol_arangement][:, mol_arangement], )
 
-    max_bonddim = 528
+    max_bonddim = 64
     evolve_dt = 160
     multisetmodel = MultisetModel(model, max_bonddim=max_bonddim)
 
     from renormalizer.mps.backend import USE_GPU, xp  
+
     logger.info(f"GPU enabled: {USE_GPU}")  
     logger.info(f"Backend: {'CuPy' if USE_GPU else 'NumPy'}")
     logger.info("maximum bond dimension:%d, evolve time step:%d", max_bonddim, evolve_dt)
@@ -76,7 +77,7 @@ if __name__ == "__main__":
         multisetmodel.evolve(evolve_dt=evolve_dt)
 
     # pd.DataFrame(populations).to_excel(datetime.now().strftime("%Y-%m-%d-%H%M_FMO") + str(max_bonddim) +'bd_' + str(evolve_dt) + "t.xlsx",
-    #                         index=False, header=False)    
+    #                             index=False, header=False)    
 
 
     '''
@@ -90,5 +91,3 @@ if __name__ == "__main__":
     ct.stop_at_edge = False
     ct.evolve(evolve_dt=evolve_dt, evolve_time=40000)
     '''
-    
-

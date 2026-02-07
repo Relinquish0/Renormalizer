@@ -1,28 +1,12 @@
 # -*- coding: utf-8 -*-
-# Author: Jinjun Zeng 
-from mpi4py import MPI
-import numpy as np
-from renormalizer.mps.backend import xp
-
-if xp != np:
-    comm = MPI.COMM_WORLD
-    rank = comm.Get_rank()
-
-    # 获取可见的 GPU 数量
-    num_gpus = xp.cuda.runtime.getDeviceCount()
-
-    # 轮询分配：Rank 0 -> GPU 0, Rank 1 -> GPU 1, ..., Rank 4 -> GPU 0
-    device_id = rank % num_gpus
-    xp.cuda.Device(device_id).use()
-
-    print(f"Rank {rank} is using GPU {device_id}")
+# Author: Jiajun Ren <jiajunren0522@gmail.com>
 
 import logging
 from typing import List, Union, Dict, Callable
 from collections import Counter
 from enum import Enum
 
-
+import numpy as np
 from scipy import stats
 
 from renormalizer.model.model import Model
@@ -54,10 +38,10 @@ from renormalizer.utils import (
     EvolveMethod
 )
 
-
+from renormalizer.mps.backend import xp
 from concurrent.futures import ThreadPoolExecutor
 
-from joblib import Parallel, delayed
+import concurrent.futures
 
 logger = logging.getLogger(__name__)
 
@@ -160,8 +144,7 @@ class MultisetMps:
             raise ValueError(f"kind={kind} is not valid.")
 
 class MultisetModel:
-    def __init__(self, model: Model, max_bonddim):
-
+    def __init__(self, model: Model, max_bonddim): 
         self.model = model
         self.evolve_config: EvolveConfig = EvolveConfig(method=MsEvolveMethod.ms_evolve_tdvp_ps)
         self.compress_config: CompressConfig  = CompressConfig(CompressCriteria.fixed, max_bonddim=max_bonddim)
@@ -255,7 +238,7 @@ class MultisetModel:
         #         self.MsMps.ms_normalize("mps_only")
 
     # @adaptive_tdvp
-    def _ms_evolve_tdvp_ps(self, ms_mps_:MultisetMps, ms_mpo:MultisetMpo, evolve_dt):
+    def _ms_evolve_tdvp_ps(self, ms_mps_:MultisetMps, ms_mpo:MultisetMpo, evolve_dt) -> "Mps":
         # PhysRevB.94.165116
         # TDVP projector splitting
         # one-site
@@ -274,9 +257,8 @@ class MultisetModel:
         # almost half is not used. Not a big deal.
         Environ_list = [[[] for _ in range(self.N_electron)] for _ in range(self.N_electron)]
         for alpha in range(self.N_electron):
-            mpsconj = ms_mps.msmps[alpha].conj()
             for beta in range(self.N_electron):
-                Environ_list[alpha][beta] = Environ(ms_mps.msmps[beta], ms_mpo.msmpo[alpha][beta], mps_conj=mpsconj)
+                Environ_list[alpha][beta] = Environ(ms_mps.msmps[beta], ms_mpo.msmpo[alpha][beta], mps_conj=ms_mps.msmps[alpha].conj())
 
         # statistics for debug output
         local_steps = []
@@ -301,16 +283,15 @@ class MultisetModel:
 
                     # Construct the partial differential equation of Multiset TDVP
                     if self.evolve_config.ivp_solver == "krylov":
-
                         mps_t, j = expm_krylov(
-                            lambda Y: self._apply_block_operator_streams(Y, hop_list, dim, shape_imps),
-                            -1j * evolve_dt / 2, 
+                            lambda Y: self._apply_hop_list(Y, hop_list, dim, shape_imps),
+                            -1j * evolve_dt / 2,
                             Y0)
                     # This part has not been changed yet.
                     # else:
                     #     sol = solve_ivp(
                     #         lambda t, y: sum(hop_beta(y.reshape(shape)).ravel() for hop_beta in hop_list)/coef, # In this line "y:" is different from origin code
-                    #         (0, evolve_dt/2), 
+                    #         (0, evolve_dt/2),
                     #         mps_alpha[imps].ravel().array,
                     #         method=self.evolve_config.ivp_solver,
                     #         rtol=self.evolve_config.ivp_rtol,
@@ -363,7 +344,7 @@ class MultisetModel:
 
                         if self.evolve_config.ivp_solver == "krylov":
                             Ut, j2 = expm_krylov(
-                                lambda Y: self._apply_block_operator_streams(Y, hop_u_list, dimU, shapeU),
+                                lambda Y: self._apply_hop_list(Y, hop_u_list, dimU, shapeU),
                                 1j * evolve_dt / 2,
                                 U0
                             )
@@ -415,7 +396,7 @@ class MultisetModel:
 
                         if self.evolve_config.ivp_solver == "krylov":
                             Ct, j2 = expm_krylov(
-                                lambda Y: self._apply_block_operator_streams(Y, hop_svt_list, dimC, shapeC),
+                                lambda Y: self._apply_hop_list(Y, hop_svt_list, dimC, shapeC),
                                 1j * evolve_dt / 2,
                                 C0
                             )
@@ -574,36 +555,22 @@ class MultisetModel:
                 result.write(key[0], key[1], tensor.copy())  
         
         return result
+    
+    def _apply_hop_list(self, Y, hop_list, dim, shape):
+        # 预先切分 Y，避免在循环中重复 reshape
+        Y = Y.reshape(self.N_electron, dim)
+        Y_out = xp.zeros((self.N_electron, dim), dtype=Y.dtype)
 
-    def _apply_block_operator(self, Y, op_list, block_dim, block_shape):
-        """
-        GPU 优化版本: 
-        1. 移除 Joblib 多线程 (避免 CUDA 上下文竞争)
-        2. 使用 CuPy 的异步特性
-        3. 显式循环累加，避免 Python sum() 产生过多的中间临时数组
-        """
-        # 确保输入 Y 已经被 reshape 为 (N_electron, block_dim)
-        Y_reshaped = Y.reshape(self.N_electron, block_dim)
-        
-        # 预分配输出数组，避免多次 concatenate 带来的显存重新分配开销
-        # Y 和 Y_out 都在 GPU 上
-        Y_out = xp.zeros((self.N_electron, block_dim), dtype=Y.dtype)
+        for alpha in range(self.N_electron):  
+            res_alpha = xp.zeros(dim, dtype=Y.dtype)
 
-        # 循环 alpha (行)
-        for alpha in range(self.N_electron):
-            # 在 GPU 上初始化累加器
-            # 注意：如果 block_shape 和 block_dim 不一致，需要注意 reshape
-            # 这里假设 op_list 返回的结果 ravel 后长度为 block_dim
-            res_alpha = xp.zeros(block_dim, dtype=Y.dtype)
-            
-            # 循环 beta (列) 进行收缩
             for beta in range(self.N_electron):
                 # 提取 Y 的第 beta 个分量
-                y_beta = Y_reshaped[beta].reshape(block_shape)
+                y_beta = Y[beta].reshape(shape)
                 
                 # 执行算符作用 (这一步是在 GPU 上进行的矩阵乘法)
                 # op_list[alpha][beta] 内部应当使用的是 cupy.tensordot 或类似操作
-                op_result = op_list[alpha][beta](y_beta)
+                op_result = hop_list[alpha][beta](y_beta)
                 
                 # 累加结果
                 res_alpha += op_result.ravel()
@@ -611,146 +578,100 @@ class MultisetModel:
             # 将计算好的 alpha 分量存入输出数组
             Y_out[alpha] = res_alpha
 
-        # 展平返回，保持与 expm_krylov 接口一致
         return Y_out.ravel()
 
+    def _apply_hop_list_gpu(self, Y, hop_list, dim, shape):
+        # --- 0. 初始化多卡缓存 (挂载在 self 上，随实例永久存在) ---
+        # 结构: self._gpu_cache[gpu_id][(alpha, beta)] = gpu_matrix
+        if not hasattr(self, '_gpu_cache'):
+            self._gpu_cache = {} 
+        
+        # 1. 预处理数据
+        Y_split = Y.reshape(self.N_electron, dim)
+        num_gpus = 4
+        
+        # 任务分配：例如 10 个电子分给 4 张卡 -> [ [0,1,2], [3,4,5], [6,7], [8,9] ]
+        tasks = [[] for _ in range(num_gpus)]
+        for i in range(self.N_electron):
+            tasks[i % num_gpus].append(i)
 
+        # 2. 定义 Worker (运行在各自的 GPU 线程中)
+        def worker(gpu_id, alpha_indices):
+            with xp.cuda.Device(gpu_id):
+                # 确保当前 GPU 的缓存容器存在
+                if gpu_id not in self._gpu_cache:
+                    self._gpu_cache[gpu_id] = {}
+                local_cache = self._gpu_cache[gpu_id]
 
-    def _apply_block_operator_joblib(self, Y, op_list, block_dim, block_shape):
-        """
-        多线程优化版本 (适用于 0.1s 级别的短任务)
-        """
-        # 1. 预处理
-        Y_reshaped = Y.reshape(self.N_electron, block_dim)
-
-        # 2. 定义任务
-        def compute_row(alpha):
-            # 这里的 sum 是串行的，但每次 op_list 调用内部的 opt_einsum 是耗时的
-            # 在多线程下，7 个 alpha 会同时进行
-            return sum(
-                op_list[alpha][beta](
-                    Y_reshaped[beta].reshape(block_shape)
-                ).ravel()
-                for beta in range(self.N_electron)
-            )
+                # A. 将状态向量 Y 广播到当前 GPU (相对较小，每次拷贝)
+                # stream 用于掩盖传输延迟（可选优化，视 Y 大小而定）
+                local_Y = xp.asarray(Y_split)
+                
+                local_results = []
+                
+                for alpha in alpha_indices:
+                    # 预分配一个列表存储 beta 求和项
+                    # 此时我们可以利用矩阵乘法的性质：Sum(Op_beta @ Y_beta)
+                    # 如果显存允许，甚至可以合并成一次大矩阵乘法，但这里为了兼容性保持循环
+                    
+                    beta_accum = None # 用于累加结果
+                    
+                    for beta in range(self.N_electron):
+                        # --- B. 获取/加载算符 (核心优化) ---
+                        cache_key = (alpha, beta)
+                        if cache_key in local_cache:
+                            op = local_cache[cache_key]
+                        else:
+                            # 第一次运行：从主存/GPU0 拷贝到当前 GPU 并缓存
+                            raw_op = hop_list[alpha][beta]
+                            # 假设 raw_op 是 cupy/numpy 数组。如果是对象，需取其 .data
+                            op = xp.asarray(raw_op) 
+                            local_cache[cache_key] = op
+                        
+                        # --- C. 计算 ---
+                        # 准备右侧向量
+                        y_in = local_Y[beta].reshape(shape)
+                        
+                        # 执行运算 (op 是 50MB 矩阵，这一步是计算密集型)
+                        # 假设 op 是矩阵，使用 @ 乘法；如果是函数则调用
+                        res = op @ y_in if not callable(op) else op(y_in)
+                        
+                        # 展平结果
+                        res_flat = res.ravel()
+                        
+                        # --- D. 累加 (避免最后 stack 的内存峰值) ---
+                        if beta_accum is None:
+                            beta_accum = res_flat
+                        else:
+                            beta_accum += res_flat
+                    
+                    local_results.append(beta_accum)
+                
+                return local_results
 
         # 3. 并行执行
-        # 关键修改：prefer='threads'
-        # 没有任何启动开销，共享内存，速度极快
-        results = Parallel(n_jobs=self.N_electron, prefer='threads')(
-            delayed(compute_row)(alpha) for alpha in range(self.N_electron)
-        )
-        
-        # 4. 拼接
-        return xp.concatenate(results)
-
-    def _apply_block_operator_mpi4py(self, Y, op_list, block_dim, block_shape):
-        from mpi4py import MPI
-        comm = MPI.COMM_WORLD
-        rank = comm.Get_rank()
-        size = comm.Get_size()
-
-        # 确保输入 Y 在所有进程上是一致的，并且在当前设备的显存中
-        # Y shape: (N_electron * block_dim)
-        
-        # 定义任务分配：简单的静态分配
-        # 例如 7 个电子，7 个进程，rank 0 处理 alpha=0, rank 1 处理 alpha=1...
-        # 如果进程数不能整除 N_electron，这里使用 Allgatherv 逻辑会更通用
-        
-        # 1. 计算当前 Rank 负责的 alpha 范围
-        # 使用 numpy.array_split 均匀分配任务索引
-        all_alphas = np.arange(self.N_electron)
-        my_alphas = np.array_split(all_alphas, size)[rank]
-        
-        # 2. 本地计算 (只计算属于 my_alphas 的部分)
-        # 预分配本地结果数组 (GPU)
-        local_size = len(my_alphas) * block_dim
-        Y_local_gpu = xp.zeros(local_size, dtype=Y.dtype)
-        
-        Y_reshaped = Y.reshape(self.N_electron, block_dim)
-
-        # 循环当前进程负责的 alpha
-        for i, alpha in enumerate(my_alphas):
-            res_alpha = xp.zeros(block_dim, dtype=Y.dtype)
+        # 使用 ThreadPoolExecutor 因为主要耗时在 GPU 计算和数据传输，GIL 不是瓶颈
+        results_map = {}
+        with concurrent.futures.ThreadPoolExecutor(max_workers=num_gpus) as executor:
+            future_to_ids = {
+                executor.submit(worker, i, tasks[i]): tasks[i] 
+                for i in range(num_gpus) if tasks[i]
+            }
             
-            # 收缩 beta (这一步依然需要所有的 Y，所以 Y 是全量的)
-            for beta in range(self.N_electron):
-                y_beta = Y_reshaped[beta].reshape(block_shape)
-                # 累加 H_ab * Y_b
-                res_alpha += op_list[alpha][beta](y_beta).ravel()
-            
-            # 填入本地结果片段
-            Y_local_gpu[i * block_dim : (i + 1) * block_dim] = res_alpha
+            for future in concurrent.futures.as_completed(future_to_ids):
+                idxs = future_to_ids[future]
+                try:
+                    gpu_res = future.result()
+                    for i, alpha in enumerate(idxs):
+                        results_map[alpha] = gpu_res[i]
+                except Exception as e:
+                    # 方便调试异步异常
+                    print(f"Error on GPU task: {e}")
+                    raise e
 
-        # 3. MPI 通信 (Gather 汇总结果)
-        # 为了保证兼容性，先将数据移回 CPU
-        Y_local_cpu = asnumpy(Y_local_gpu)
+        # 4. 结果拉回并拼接
+        # 注意：这里会发生 Device -> Host -> Device (或 P2P) 的传输
+        # 为了速度，统一拉回主设备 (Device 0)
+        final_list = [xp.asarray(results_map[alpha], device=0) for alpha in range(self.N_electron)]
         
-        # 准备接收缓冲区
-        if rank == 0:
-            # 只有 rank 0 需要分配完整 buffer (如果是 Gather)
-            # 但我们需要 Allgather，因为 Krylov 算法要求每个进程都有完整的下一步向量
-            pass 
-
-        # 计算每个进程的数据量，用于 Allgatherv
-        # counts: 每个进程贡献的元素数量
-        counts = [len(np.array_split(all_alphas, size)[r]) * block_dim for r in range(size)]
-        # displs: 偏移量
-        displs = [sum(counts[:r]) for r in range(size)]
-        
-        # 全局 CPU 缓冲区
-        Y_global_cpu = np.empty(self.N_electron * block_dim, dtype=Y.dtype)
-        
-        # 执行通信：将分散计算的结果拼成完整向量，并分发给所有进程
-        comm.Allgatherv([Y_local_cpu, MPI.DOUBLE_COMPLEX], 
-                        [Y_global_cpu, counts, displs, MPI.DOUBLE_COMPLEX])
-        
-        # 4. 将汇总后的完整向量拷回 GPU
-        return asxp(Y_global_cpu)
-
-    def _apply_block_operator_streams(self, Y, op_list, block_dim, block_shape):
-        """
-        基于 CUDA Streams 的并行版本
-        替代 Joblib，利用 GPU 自身的并发能力处理多行计算
-        """
-        # 1. 预处理
-        Y_reshaped = Y.reshape(self.N_electron, block_dim)
-        
-        # 预分配输出显存 (在默认流上分配)
-        Y_out = xp.zeros((self.N_electron, block_dim), dtype=Y.dtype)
-        
-        # 2. 创建 CUDA 流池
-        # 为每一行 (alpha) 创建一个独立的流
-        streams = [xp.cuda.Stream() for _ in range(self.N_electron)]
-        
-        # 3. 并发派发任务
-        # 注意：这里的 Python for 循环依然是串行的，但是派发给 GPU 的指令是异步的
-        # Python 会极快地跑完这个循环，把任务塞进 7 个不同的 GPU 队列中
-        for alpha in range(self.N_electron):
-            with streams[alpha]:
-                # 在当前流 (stream[alpha]) 中执行累加
-                # 注意：我们需要一个临时的累加变量，避免直接写入 Y_out 导致潜在的竞争（虽然写不同行是安全的，但显式分开更保险）
-                
-                # 获取当前 alpha 行需要的 beta 输入
-                # 这一步没有计算，只是切片，非常快
-                y_betas = [Y_reshaped[beta].reshape(block_shape) for beta in range(self.N_electron)]
-                
-                # 执行核心计算
-                # 这里的 sum 会调用一系列 cupy 内核
-                res_alpha = sum(
-                    op_list[alpha][beta](y_betas[beta]).ravel()
-                    for beta in range(self.N_electron)
-                )
-                
-                # 将结果写入输出数组
-                # 注意：Y_out 的内存是共享的，但不同的流写入不同的行 (alpha)，互不冲突
-                Y_out[alpha] = res_alpha
-
-        # 4. 同步
-        # 等待所有流完成工作，确保 Y_out 数据已就绪
-        # 这一步是必须的，否则返回时 GPU 可能还没算完
-        for s in streams:
-            s.synchronize()
-
-        # 5. 返回
-        return Y_out.ravel()
+        return xp.concatenate(final_list)
