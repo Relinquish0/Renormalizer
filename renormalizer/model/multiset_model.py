@@ -5,7 +5,6 @@ import logging
 from typing import List, Union, Dict, Callable
 from collections import Counter
 from enum import Enum
-
 import numpy as np
 from scipy import stats
 
@@ -28,7 +27,6 @@ from renormalizer.mps.matrix import (
     asnumpy,
     asxp)
 from renormalizer.mps import svd_qn
-from renormalizer.mps.hop_expr import hop_expr
 
 from renormalizer.utils import (
     OptimizeConfig,
@@ -39,9 +37,6 @@ from renormalizer.utils import (
 )
 
 from renormalizer.mps.backend import xp
-from concurrent.futures import ThreadPoolExecutor
-
-import concurrent.futures
 
 logger = logging.getLogger(__name__)
 
@@ -172,6 +167,9 @@ class MultisetModel:
         self.MsMps.ms_normalize("mps_only")
         self.cdd_init_mps()
 
+        self._matvec_calls = 0
+        self._ivp_calls = 0
+
     def SplitHamTerm(self):
         # Convert Hamiltonian from H to H^{\alpha,\beta} and storage in self.MsOp
         for i in range(len(self.model.ham_terms)):
@@ -270,23 +268,25 @@ class MultisetModel:
                     dim = int(np.prod(shape_imps))
                     
                     # Construt the sum of efficient Hamiltonian
-                    l_array_ab = [[[] for _ in range(self.N_electron)] for _ in range(self.N_electron)]                    
-                    r_array_ab = [[[] for _ in range(self.N_electron)] for _ in range(self.N_electron)]
-                    hop_list = [[[] for _ in range(self.N_electron)] for _ in range(self.N_electron)]
+                    l_array_ab = [[None for _ in range(self.N_electron)] for _ in range(self.N_electron)]
+                    r_array_ab = [[None for _ in range(self.N_electron)] for _ in range(self.N_electron)]
+                    w_array_ab = [[None for _ in range(self.N_electron)] for _ in range(self.N_electron)]
                     for alpha in range(self.N_electron):
                         for beta in range(self.N_electron):
                             l_array_ab[alpha][beta] = Environ_list[alpha][beta].read("L", imps - 1)
                             r_array_ab[alpha][beta] = Environ_list[alpha][beta].read("R", imps + 1)
-                            hop_list[alpha][beta] = hop_expr(l_array_ab[alpha][beta], r_array_ab[alpha][beta], [asxp(ms_mpo.msmpo[alpha][beta][imps].array)], shape_imps)
+                            w_array_ab[alpha][beta] = asxp(ms_mpo.msmpo[alpha][beta][imps].array)
 
+                    batched_data = self._build_batched_data(l_array_ab, r_array_ab, w_array_ab)
                     Y0 = xp.concatenate([asxp(ms_mps.msmps[a][imps].ravel().array) for a in range(self.N_electron)])
-
                     # Construct the partial differential equation of Multiset TDVP
+                    ivp_eq = lambda Y: self._apply_hop_batched(Y, batched_data, dim, shape_imps)
                     if self.evolve_config.ivp_solver == "krylov":
                         mps_t, j = expm_krylov(
-                            lambda Y: self._apply_hop_list(Y, hop_list, dim, shape_imps),
+                            ivp_eq,
                             -1j * evolve_dt / 2,
                             Y0)
+                        self._ivp_calls += 1
                     # This part has not been changed yet.
                     # else:
                     #     sol = solve_ivp(
@@ -327,27 +327,28 @@ class MultisetModel:
 
                         shapeU = list(u_list[0].shape)
                         dimU = int(np.prod(shapeU))
-                        # Construct hop_u list
-                        hop_u_list = [[[] for _ in range(self.N_electron)] for _ in range(self.N_electron)]
+                        # Construct reverse U environment tensors
+                        r_array_u = [[None for _ in range(self.N_electron)] for _ in range(self.N_electron)]
                         for alpha in range(self.N_electron):
                             mps_conj_alpha = [None] * len(ms_mps.msmps[alpha])
                             mps_conj_alpha[imps] = ms_mps.msmps[alpha][imps].conj()
                             for beta in range(self.N_electron):
-                                r_array = Environ_list[alpha][beta].GetLR(
-                                    "R", imps, ms_mps.msmps[beta], ms_mpo.msmpo[alpha][beta], itensor=r_array_ab[alpha][beta], method="System", 
+                                r_array_u[alpha][beta] = Environ_list[alpha][beta].GetLR(
+                                    "R", imps, ms_mps.msmps[beta], ms_mpo.msmpo[alpha][beta], itensor=r_array_ab[alpha][beta], method="System",
                                     mps_conj=mps_conj_alpha
                                 )
-                                # reverse update u site
-                                hop_u_list[alpha][beta] = hop_expr(l_array_ab[alpha][beta], r_array, [], shapeU)
 
+                        batched_u = self._build_batched_data(l_array_ab, r_array_u)
                         U0 = xp.concatenate([u_list[alpha].ravel() for alpha in range(self.N_electron)])
 
                         if self.evolve_config.ivp_solver == "krylov":
+                            ivp_eq_Ut = lambda Y: self._apply_hop_batched(Y, batched_u, dimU, shapeU)
                             Ut, j2 = expm_krylov(
-                                lambda Y: self._apply_hop_list(Y, hop_u_list, dimU, shapeU),
+                                ivp_eq_Ut,
                                 1j * evolve_dt / 2,
                                 U0
                             )
+                            self._ivp_calls += 1
                         # This part has not been changed yet.
                         # else:
                         #     sol = solve_ivp(
@@ -379,27 +380,27 @@ class MultisetModel:
                         shapeC = list(vt_list[0].shape)
                         dimC = int(np.prod(shapeC))
 
-                        # Construct hop_svt list
-                        hop_svt_list = [[[] for _ in range(self.N_electron)] for _ in range(self.N_electron)]
+                        # Construct reverse C environment tensors
+                        l_array_c = [[None for _ in range(self.N_electron)] for _ in range(self.N_electron)]
                         for alpha in range(self.N_electron):
                             mps_conj_alpha = [None] * len(ms_mps.msmps[alpha])
                             mps_conj_alpha[imps] = ms_mps.msmps[alpha][imps].conj()
                             for beta in range(self.N_electron):
-                                l_array = (Environ_list[alpha][beta].GetLR(
-                                    "L", imps, ms_mps.msmps[beta], ms_mpo.msmpo[alpha][beta], itensor=l_array_ab[alpha][beta], method="System", 
+                                l_array_c[alpha][beta] = Environ_list[alpha][beta].GetLR(
+                                    "L", imps, ms_mps.msmps[beta], ms_mpo.msmpo[alpha][beta], itensor=l_array_ab[alpha][beta], method="System",
                                     mps_conj=mps_conj_alpha
-                                ))
-                                # reverse update svt site
-                                hop_svt_list[alpha][beta] = hop_expr(l_array, r_array_ab[alpha][beta], [], shapeC)
-                        
-                        C0 = xp.concatenate([vt_list[alpha].ravel() for alpha in range(self.N_electron)])
+                                )
 
+                        batched_c = self._build_batched_data(l_array_c, r_array_ab)
+                        C0 = xp.concatenate([vt_list[alpha].ravel() for alpha in range(self.N_electron)])
+                        ivp_eq_Ct = lambda Y: self._apply_hop_batched(Y, batched_c, dimC, shapeC)
                         if self.evolve_config.ivp_solver == "krylov":
                             Ct, j2 = expm_krylov(
-                                lambda Y: self._apply_hop_list(Y, hop_svt_list, dimC, shapeC),
+                                ivp_eq_Ct,
                                 1j * evolve_dt / 2,
                                 C0
                             )
+                            self._ivp_calls += 1
                         # else:
                         #     sol = solve_ivp(
                         #         lambda t, y: sum(hop_svt_beta(y.reshape(shape_svt)).ravel() for hop_svt_beta in hop_svt_list) / -coef,
@@ -426,9 +427,9 @@ class MultisetModel:
                             ms_mps.msmps[alpha][imps] = mps_t[alpha].reshape(shape_imps)
             for alpha in range(self.N_electron):
                 ms_mps.msmps[alpha]._switch_direction()
-        # steps_stat = stats.describe(local_steps)
-        # logger.debug(f"TDVP-PS Krylov space: {steps_stat}")
-        # self.evolve_config.stat = steps_stat
+        steps_stat = stats.describe(local_steps)
+        logger.debug(f"TDVP-PS Krylov space: {steps_stat}")
+        self.evolve_config.stat = steps_stat
         
         return ms_mps
 
@@ -556,122 +557,118 @@ class MultisetModel:
         
         return result
     
-    def _apply_hop_list(self, Y, hop_list, dim, shape):
-        # 预先切分 Y，避免在循环中重复 reshape
-        Y = Y.reshape(self.N_electron, dim)
-        Y_out = xp.zeros((self.N_electron, dim), dtype=Y.dtype)
+    def _build_batched_data(self, l_arrays, r_arrays, w_arrays=None):
+        """Build batched tensors grouped by operator shape (no padding).
 
-        for alpha in range(self.N_electron):  
-            res_alpha = xp.zeros(dim, dtype=Y.dtype)
+        Groups all N² (alpha, beta) pairs by their MPO bond dimensions,
+        then stacks tensors within each group. Since all tensors in a group
+        have identical shapes, no zero-padding is needed.
 
-            for beta in range(self.N_electron):
-                # 提取 Y 的第 beta 个分量
-                y_beta = Y[beta].reshape(shape)
-                
-                # 执行算符作用 (这一步是在 GPU 上进行的矩阵乘法)
-                # op_list[alpha][beta] 内部应当使用的是 cupy.tensordot 或类似操作
-                op_result = hop_list[alpha][beta](y_beta)
-                
-                # 累加结果
-                res_alpha += op_result.ravel()
-            
-            # 将计算好的 alpha 分量存入输出数组
-            Y_out[alpha] = res_alpha
+        For FMO (N=7): diagonal pairs (M=2, 7 pairs) and off-diagonal
+        pairs (M=1, 42 pairs) form 2 groups.
 
+        Args:
+            l_arrays: N×N nested list of L tensors (cupy arrays on GPU)
+            r_arrays: N×N nested list of R tensors (cupy arrays on GPU)
+            w_arrays: N×N nested list of W tensors for nsite=1, None for nsite=0
+
+        Returns:
+            list of group dicts for _apply_hop_batched
+        """
+        N = self.N_electron
+        nsite = 1 if w_arrays is not None else 0
+
+        # Group pairs by tensor shapes (MPO bond dimensions)
+        groups = {}
+        for alpha in range(N):
+            for beta in range(N):
+                if nsite == 1:
+                    W = w_arrays[alpha][beta]
+                    key = (W.shape[0], W.shape[3])  # (M_left, M_right)
+                else:
+                    key = (l_arrays[alpha][beta].shape[1],)  # (M,)
+                if key not in groups:
+                    groups[key] = []
+                groups[key].append((alpha, beta))
+
+        # For each group, stack tensors (no padding needed)
+        batched_groups = []
+        dtype = l_arrays[0][0].dtype
+        for key, pairs in groups.items():
+            n_pairs = len(pairs)
+
+            L_stack = xp.stack([l_arrays[a][b] for a, b in pairs])
+            R_stack = xp.stack([r_arrays[a][b] for a, b in pairs])
+
+            W_stack = None
+            if nsite == 1:
+                W_stack = xp.stack([w_arrays[a][b] for a, b in pairs])
+
+            beta_idx = xp.array([b for _, b in pairs], dtype=xp.int64)
+
+            # Per-group scatter matrix: (N, n_pairs)
+            S = xp.zeros((N, n_pairs), dtype=dtype)
+            for i, (alpha, _) in enumerate(pairs):
+                S[alpha, i] = 1.0
+
+            batched_groups.append({
+                'L': L_stack, 'R': R_stack, 'W': W_stack,
+                'S': S, 'beta_idx': beta_idx, 'nsite': nsite,
+                'n_pairs': n_pairs,
+            })
+
+        return batched_groups
+
+    def _apply_hop_batched(self, Y, batched_groups, dim, shape):
+        """Apply hop operator using shape-grouped batched einsum.
+
+        Iterates over groups of (alpha, beta) pairs that share the same
+        MPO bond dimensions. Within each group, uses batched einsum
+        (no padding). Accumulates results across groups.
+
+        For nsite=1 (main site): 3 einsums per group
+            "abc, bdef, lfk, cek -> adl" decomposed as:
+            Step 1: Y⊗R  →  "ncek, nlfk -> ncelf"  (contract over k)
+            Step 2: ⊗W   →  "ncelf, nbdef -> ncdlb" (contract over e, f)
+            Step 3: ⊗L   →  "ncdlb, nabc -> nadl"   (contract over c, b)
+
+        For nsite=0 (reverse U/C): 2 einsums per group
+            "abc, lbk, ck -> al" decomposed as:
+            Step 1: Y⊗R  →  "nck, nlbk -> nclb"     (contract over k)
+            Step 2: ⊗L   →  "nclb, nabc -> nal"      (contract over c, b)
+        """
+        N = self.N_electron
+        Y = Y.reshape(N, dim)
+        Y_out = xp.zeros((N, dim), dtype=Y.dtype)
+
+        for group in batched_groups:
+            L_all = group['L']
+            R_all = group['R']
+            S = group['S']
+            beta_idx = group['beta_idx']
+            nsite = group['nsite']
+            n_pairs = group['n_pairs']
+
+            # Expand Y: Y_exp[i] = Y[beta_of_pair_i]
+            Y_exp = Y[beta_idx]  # (n_pairs, dim)
+
+            if nsite == 1:
+                W_all = group['W']
+                Y_exp = Y_exp.reshape(n_pairs, shape[0], shape[1], shape[2])
+
+                temp = xp.einsum('ncek,nlfk->ncelf', Y_exp, R_all)
+                temp2 = xp.einsum('ncelf,nbdef->ncdlb', temp, W_all)
+                out = xp.einsum('ncdlb,nabc->nadl', temp2, L_all)
+            else:
+                Y_exp = Y_exp.reshape(n_pairs, shape[0], shape[1])
+
+                temp = xp.einsum('nck,nlbk->nclb', Y_exp, R_all)
+                out = xp.einsum('nclb,nabc->nal', temp, L_all)
+
+            # Scatter: accumulate results to alpha
+            out_flat = out.reshape(n_pairs, dim)
+            Y_out += xp.matmul(S, out_flat)  # (N, dim)
+
+        self._matvec_calls += 1
         return Y_out.ravel()
 
-    def _apply_hop_list_gpu(self, Y, hop_list, dim, shape):
-        # --- 0. 初始化多卡缓存 (挂载在 self 上，随实例永久存在) ---
-        # 结构: self._gpu_cache[gpu_id][(alpha, beta)] = gpu_matrix
-        if not hasattr(self, '_gpu_cache'):
-            self._gpu_cache = {} 
-        
-        # 1. 预处理数据
-        Y_split = Y.reshape(self.N_electron, dim)
-        num_gpus = 4
-        
-        # 任务分配：例如 10 个电子分给 4 张卡 -> [ [0,1,2], [3,4,5], [6,7], [8,9] ]
-        tasks = [[] for _ in range(num_gpus)]
-        for i in range(self.N_electron):
-            tasks[i % num_gpus].append(i)
-
-        # 2. 定义 Worker (运行在各自的 GPU 线程中)
-        def worker(gpu_id, alpha_indices):
-            with xp.cuda.Device(gpu_id):
-                # 确保当前 GPU 的缓存容器存在
-                if gpu_id not in self._gpu_cache:
-                    self._gpu_cache[gpu_id] = {}
-                local_cache = self._gpu_cache[gpu_id]
-
-                # A. 将状态向量 Y 广播到当前 GPU (相对较小，每次拷贝)
-                # stream 用于掩盖传输延迟（可选优化，视 Y 大小而定）
-                local_Y = xp.asarray(Y_split)
-                
-                local_results = []
-                
-                for alpha in alpha_indices:
-                    # 预分配一个列表存储 beta 求和项
-                    # 此时我们可以利用矩阵乘法的性质：Sum(Op_beta @ Y_beta)
-                    # 如果显存允许，甚至可以合并成一次大矩阵乘法，但这里为了兼容性保持循环
-                    
-                    beta_accum = None # 用于累加结果
-                    
-                    for beta in range(self.N_electron):
-                        # --- B. 获取/加载算符 (核心优化) ---
-                        cache_key = (alpha, beta)
-                        if cache_key in local_cache:
-                            op = local_cache[cache_key]
-                        else:
-                            # 第一次运行：从主存/GPU0 拷贝到当前 GPU 并缓存
-                            raw_op = hop_list[alpha][beta]
-                            # 假设 raw_op 是 cupy/numpy 数组。如果是对象，需取其 .data
-                            op = xp.asarray(raw_op) 
-                            local_cache[cache_key] = op
-                        
-                        # --- C. 计算 ---
-                        # 准备右侧向量
-                        y_in = local_Y[beta].reshape(shape)
-                        
-                        # 执行运算 (op 是 50MB 矩阵，这一步是计算密集型)
-                        # 假设 op 是矩阵，使用 @ 乘法；如果是函数则调用
-                        res = op @ y_in if not callable(op) else op(y_in)
-                        
-                        # 展平结果
-                        res_flat = res.ravel()
-                        
-                        # --- D. 累加 (避免最后 stack 的内存峰值) ---
-                        if beta_accum is None:
-                            beta_accum = res_flat
-                        else:
-                            beta_accum += res_flat
-                    
-                    local_results.append(beta_accum)
-                
-                return local_results
-
-        # 3. 并行执行
-        # 使用 ThreadPoolExecutor 因为主要耗时在 GPU 计算和数据传输，GIL 不是瓶颈
-        results_map = {}
-        with concurrent.futures.ThreadPoolExecutor(max_workers=num_gpus) as executor:
-            future_to_ids = {
-                executor.submit(worker, i, tasks[i]): tasks[i] 
-                for i in range(num_gpus) if tasks[i]
-            }
-            
-            for future in concurrent.futures.as_completed(future_to_ids):
-                idxs = future_to_ids[future]
-                try:
-                    gpu_res = future.result()
-                    for i, alpha in enumerate(idxs):
-                        results_map[alpha] = gpu_res[i]
-                except Exception as e:
-                    # 方便调试异步异常
-                    print(f"Error on GPU task: {e}")
-                    raise e
-
-        # 4. 结果拉回并拼接
-        # 注意：这里会发生 Device -> Host -> Device (或 P2P) 的传输
-        # 为了速度，统一拉回主设备 (Device 0)
-        final_list = [xp.asarray(results_map[alpha], device=0) for alpha in range(self.N_electron)]
-        
-        return xp.concatenate(final_list)

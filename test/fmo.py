@@ -58,7 +58,7 @@ if __name__ == "__main__":
     mol_arangement = np.array([7, 5, 3, 1, 2, 4, 6]) - 1
     model = HolsteinModel(list(np.array(mlist)[mol_arangement]), j_matrix_au[mol_arangement][:, mol_arangement], )
 
-    max_bonddim = 64
+    max_bonddim = 128
     evolve_dt = 160
     multisetmodel = MultisetModel(model, max_bonddim=max_bonddim)
 
@@ -69,15 +69,15 @@ if __name__ == "__main__":
     logger.info("maximum bond dimension:%d, evolve time step:%d", max_bonddim, evolve_dt)
 
     populations = []
-    for i in range(10):
+    for i in range(250):
 
         population = multisetmodel.popultation()
         logger.info("%dth population: %s", i, population)
         populations.append(population)
         multisetmodel.evolve(evolve_dt=evolve_dt)
 
-    # pd.DataFrame(populations).to_excel(datetime.now().strftime("%Y-%m-%d-%H%M_FMO") + str(max_bonddim) +'bd_' + str(evolve_dt) + "t.xlsx",
-    #                             index=False, header=False)    
+    pd.DataFrame(populations).to_excel(datetime.now().strftime("%Y-%m-%d-%H%M_FMO") + str(max_bonddim) +'bd_' + str(evolve_dt) + "t.xlsx",
+                                index=False, header=False)    
 
 
     '''
