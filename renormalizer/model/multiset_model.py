@@ -16,7 +16,7 @@ from renormalizer.utils import Quantity, cached_property
 
 from renormalizer.mps.mpo import Mpo
 from renormalizer.mps import Mps
-from renormalizer.mps.mps import adaptive_tdvp
+from renormalizer.mps.mps import adaptive_tdvp, expand_bond_dimension_general
 from renormalizer.mps.lib import Environ, _sum
 from renormalizer.lib import solve_ivp, expm_krylov
 from renormalizer.mps.matrix import (
@@ -56,7 +56,12 @@ class MultisetMpo:
     def _ConstructMsMpo(self):
         for i in range(self.N_electron):
             for j in range(self.N_electron):
-                self.msmpo[i][j] = Mpo(model=self.MsModel[i][j],terms=None)
+                # Check if the model has any Hamiltonian terms
+                # If not, create an empty list to represent an empty MPO
+                if len(self.MsModel[i][j].ham_terms) == 0:
+                    self.msmpo[i][j] = []  # Empty MPO
+                else:
+                    self.msmpo[i][j] = Mpo(model=self.MsModel[i][j],terms=None)
 
     def total_mpo(self) -> "Mpo":
         mpos = []
@@ -139,7 +144,7 @@ class MultisetMps:
             raise ValueError(f"kind={kind} is not valid.")
 
 class MultisetModel:
-    def __init__(self, model: Model, max_bonddim): 
+    def __init__(self, model: Model, max_bonddim, temperature: Quantity = Quantity(0,"K")): 
         self.model = model
         self.evolve_config: EvolveConfig = EvolveConfig(method=MsEvolveMethod.ms_evolve_tdvp_ps)
         self.compress_config: CompressConfig  = CompressConfig(CompressCriteria.fixed, max_bonddim=max_bonddim)
@@ -166,7 +171,7 @@ class MultisetModel:
         self.MsMps = MultisetMps(self.MsModel,self.N_electron)
         self.MsMps.ms_normalize("mps_only")
         self.cdd_init_mps()
-
+    
         self._matvec_calls = 0
         self._ivp_calls = 0
 
@@ -206,7 +211,6 @@ class MultisetModel:
             else:
                 new_split_symbol.append(new_op.split_symbol[i])
                 new_qn_list.append(new_op.qn_list[i])
-
                 new_dofs.append(new_op.dofs[i])
                 i += 1
             
@@ -273,6 +277,9 @@ class MultisetModel:
                     w_array_ab = [[None for _ in range(self.N_electron)] for _ in range(self.N_electron)]
                     for alpha in range(self.N_electron):
                         for beta in range(self.N_electron):
+                            # Skip empty MPOs (when H^{alpha,beta} has no operators)
+                            if len(ms_mpo.msmpo[alpha][beta]) == 0:
+                                continue
                             l_array_ab[alpha][beta] = Environ_list[alpha][beta].read("L", imps - 1)
                             r_array_ab[alpha][beta] = Environ_list[alpha][beta].read("R", imps + 1)
                             w_array_ab[alpha][beta] = asxp(ms_mpo.msmpo[alpha][beta][imps].array)
@@ -333,6 +340,9 @@ class MultisetModel:
                             mps_conj_alpha = [None] * len(ms_mps.msmps[alpha])
                             mps_conj_alpha[imps] = ms_mps.msmps[alpha][imps].conj()
                             for beta in range(self.N_electron):
+                                # Skip empty MPOs
+                                if len(ms_mpo.msmpo[alpha][beta]) == 0:
+                                    continue
                                 r_array_u[alpha][beta] = Environ_list[alpha][beta].GetLR(
                                     "R", imps, ms_mps.msmps[beta], ms_mpo.msmpo[alpha][beta], itensor=r_array_ab[alpha][beta], method="System",
                                     mps_conj=mps_conj_alpha
@@ -386,6 +396,9 @@ class MultisetModel:
                             mps_conj_alpha = [None] * len(ms_mps.msmps[alpha])
                             mps_conj_alpha[imps] = ms_mps.msmps[alpha][imps].conj()
                             for beta in range(self.N_electron):
+                                # Skip empty MPOs
+                                if len(ms_mpo.msmpo[alpha][beta]) == 0:
+                                    continue
                                 l_array_c[alpha][beta] = Environ_list[alpha][beta].GetLR(
                                     "L", imps, ms_mps.msmps[beta], ms_mpo.msmpo[alpha][beta], itensor=l_array_ab[alpha][beta], method="System",
                                     mps_conj=mps_conj_alpha
@@ -447,32 +460,125 @@ class MultisetModel:
                 #     self.MsMps.msmps[beta][i].array = np.zeros(shape=self.MsMps.msmps[beta][i].shape, dtype=self.MsMps.msmps[beta][i].dtype) 
         self.MsMps.ms_normalize("mps_only")
 
-    def cdd_init_mps(self):
-        '''
-        This is a copy from ChargeDiffusionDynamics.init_mps
+    def expand_bond_dimension_multiset(self, coef: float = 1e-10, use_hint: bool = True):
+        """
+        Expand the bond dimension of multiset MPS.
 
-        In ChargeDiffusionDynamics.init_mps: excitation/creat electron -> set Mpo's offset -> expand bond dimension -> cononicalise
-        In cdd_init_mps: expand bond dimension -> excitation -> offset
-        '''
+        Two mutually exclusive modes:
+        - use_hint=False: Random expansion (standard expand_bond_dimension_general, hint_mpo=None)
+        - use_hint=True:  Krylov expansion: iteratively apply diagonal block H^{αα} as hint_mpo,
+                          with off-diagonal coupling terms Σ_{β≠α} H^{αβ}|Ψ_β⟩ as initial excitation (ex_mps)
 
+        Key design:
+        1. Iteratively apply H^{αα} to the seed state, accumulating until bond_dim ≥ max_bonddim
+           (completely consistent with standard expand_bond_dimension_general), ensuring the
+           target bond dimension is actually reached
+        2. After expansion, reset coeff=1 and place the physical norm back into the tensor array,
+           enabling ms_normalize to function correctly
+        3. Two modes are mutually exclusive, code structure is clear
+        """
+        # ── setting compress_config ──────────────────────────
         for alpha in range(self.N_electron):
             self.MsMps.msmps[alpha].compress_config = self.compress_config
-            self.MsMps.msmps[alpha] = self.MsMps.msmps[alpha].expand_bond_dimension() # Now is random expanded   
 
-        self.fc_excitation(self.N_electron // 2)      
+        # randomly expand
+        if not use_hint:
+            for alpha in range(self.N_electron):
+                # Using the function in renormalizer/mps/mps.py
+                expanded = expand_bond_dimension_general(
+                    self.MsMps.msmps[alpha],
+                    hint_mpo=None,
+                    coef=coef,
+                    ex_mps=None
+                )
+                expanded.scale(float(abs(expanded.coeff)), inplace=True)
+                expanded.coeff = 1.0
+                self.MsMps.msmps[alpha] = expanded
+            return
+
+        # fill states related to `hint_mpo`
+        # preserved the original msmps
+        original_mps = [self.MsMps.msmps[beta].copy()
+                        for beta in range(self.N_electron)]
+
+        for alpha in range(self.N_electron):
+            mps_alpha = original_mps[alpha]
+            mps_alpha.compress_config = self.compress_config
+
+            # diagnoal MPO terms：H^{αα}, Krylov expansion iteration
+            diag_mpo = self.MsMpo.msmpo[alpha][alpha]
+            hint_mpo = diag_mpo if len(diag_mpo) > 0 else None
+
+            # non-diagonal terms：Σ_{β≠α} H^{αβ}|Ψ_β⟩
+            # work as ex_mps for better direction
+            cross_states = []
+            for beta in range(self.N_electron):
+                if beta == alpha:
+                    continue
+                if len(self.MsMpo.msmpo[alpha][beta]) == 0:
+                    continue
+                driven = self.MsMpo.msmpo[alpha][beta].apply(original_mps[beta])
+                cross_states.append(driven)
+
+            ex_mps = _sum(cross_states, compress=False) if cross_states else None
+            if ex_mps is not None:
+                ex_mps.compress_config = self.compress_config
+
+            expanded = expand_bond_dimension_general(
+                mps_alpha,
+                hint_mpo=hint_mpo,
+                coef=coef,
+                ex_mps=ex_mps
+            )
+
+            expanded.scale(float(abs(expanded.coeff)), inplace=True)
+            expanded.coeff = 1.0
+            self.MsMps.msmps[alpha] = expanded
+
+
+    def cdd_init_mps(self, use_hint: bool = True):
+        """
+        charge diffusion dynamics initialisation:   Frank-Condon excitation → compute E₀ →  reset MPO with offset 
+                                                    → expand bond dim → normalization
+
+        """
+
+        # Step 1：FC excitation 
+        self.fc_excitation(self.N_electron // 2)
+
+        logger.debug(f"[init] mp_norms after fc_excitation: "
+                     f"{[self.MsMps.msmps[a].mp_norm for a in range(self.N_electron)]}")
+
+        # Step 2：compute E₀
         energy = Quantity(self.Hamiltonian())
+        logger.debug(f"[init] E0 = {energy.as_au():.6f} a.u.")
 
+        # Step 3：reset MPO with offset
         for alpha in range(self.N_electron):
             for beta in range(self.N_electron):
-                # tentative_mpo = self.MsMpo.msmpo[alpha][beta]
-
-                if alpha == beta:
-                    self.MsMpo.msmpo[alpha][beta] = Mpo(model = self.MsModel[alpha][beta], terms = None, offset = energy)
+                if len(self.MsModel[alpha][beta].ham_terms) == 0:
+                    self.MsMpo.msmpo[alpha][beta] = []
+                elif alpha == beta:
+                    self.MsMpo.msmpo[alpha][beta] = Mpo(
+                        model=self.MsModel[alpha][beta],
+                        terms=None,
+                        offset=energy
+                    )
                 else:
-                    self.MsMpo.msmpo[alpha][beta] = Mpo(model = self.MsModel[alpha][beta], terms = None, offset = Quantity(0))
+                    self.MsMpo.msmpo[alpha][beta] = Mpo(
+                        model=self.MsModel[alpha][beta],
+                        terms=None,
+                        offset=Quantity(0)
+                    )
 
-        for alpha in range(self.N_electron):
-            self.MsMps.msmps[alpha].canonicalise() # seem to make no sense  
+        # Step 4：expand bond dim
+        self.expand_bond_dimension_multiset(coef=1e-10, use_hint=use_hint)
+
+        # Step 5：normalization
+        self.MsMps.ms_normalize("mps_only")
+
+        logger.debug(f"[init] mp_norms after expand+normalize: "
+                     f"{[self.MsMps.msmps[a].mp_norm for a in range(self.N_electron)]}")
 
 
     def popultation(self):
@@ -488,6 +594,9 @@ class MultisetModel:
         num = 0.0
         for alpha in range(self.N_electron):
             for beta in range(self.N_electron):
+                # Skip empty MPOs (when H^{alpha,beta} has no operators)
+                if len(self.MsMpo.msmpo[alpha][beta]) == 0:
+                    continue
                 num += self.MsMps.msmps[beta].expectation(
                     mpo=self.MsMpo.msmpo[alpha][beta],
                     self_conj=self.MsMps.msmps[alpha].conj()
@@ -519,43 +628,6 @@ class MultisetModel:
 
     def Inner_product(self) -> "float":
         return self.MsMps.total_mps().conj().dot(self.MsMps.total_mps())
-
-    def add_environ_tensors(self, environ1, environ2):  
-        """  
-        Parameters  
-        ----------  
-        environ1: Environ 
-        environ2: Environ 
-
-        Returns  
-        -------  
-        Environ  
-        """  
-        # 创建新的 Environ 对象  
-        result = Environ.__new__(Environ)  
-        result._virtual_disk = {}  
-        result.sentinel = environ1.sentinel  
-        
-        # 获取所有键的并集  
-        all_keys = set(environ1._virtual_disk.keys()) | set(environ2._virtual_disk.keys())  
-        
-        # 对应相加张量  
-        for key in all_keys:  
-            if key in environ1._virtual_disk and key in environ2._virtual_disk:  
-                # 两个都有，相加  
-                tensor1 = environ1.read(key[0], key[1])  
-                tensor2 = environ2.read(key[0], key[1])  
-                result.write(key[0], key[1], tensor1 + tensor2)  
-            elif key in environ1._virtual_disk:  
-                # 只有 environ1 有  
-                tensor = environ1.read(key[0], key[1])  
-                result.write(key[0], key[1], tensor.copy())  
-            else:  
-                # 只有 environ2 有  
-                tensor = environ2.read(key[0], key[1])  
-                result.write(key[0], key[1], tensor.copy())  
-        
-        return result
     
     def _build_batched_data(self, l_arrays, r_arrays, w_arrays=None):
         """Build batched tensors grouped by operator shape (no padding).
@@ -582,18 +654,38 @@ class MultisetModel:
         groups = {}
         for alpha in range(N):
             for beta in range(N):
+                # Skip pairs where MPO is empty (None arrays)
                 if nsite == 1:
                     W = w_arrays[alpha][beta]
+                    if W is None:
+                        continue
                     key = (W.shape[0], W.shape[3])  # (M_left, M_right)
                 else:
-                    key = (l_arrays[alpha][beta].shape[1],)  # (M,)
+                    L = l_arrays[alpha][beta]
+                    if L is None:
+                        continue
+                    key = (L.shape[1],)  # (M,)
                 if key not in groups:
                     groups[key] = []
                 groups[key].append((alpha, beta))
 
         # For each group, stack tensors (no padding needed)
         batched_groups = []
-        dtype = l_arrays[0][0].dtype
+
+        # Return empty list if no valid pairs exist (all MPOs are empty)
+        if not groups:
+            return batched_groups
+
+        # Find dtype from first non-None array
+        dtype = None
+        for alpha in range(N):
+            for beta in range(N):
+                if l_arrays[alpha][beta] is not None:
+                    dtype = l_arrays[alpha][beta].dtype
+                    break
+            if dtype is not None:
+                break
+
         for key, pairs in groups.items():
             n_pairs = len(pairs)
 
