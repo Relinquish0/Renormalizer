@@ -15,7 +15,7 @@ from renormalizer.model.op import Op, OpSum
 from renormalizer.utils import Quantity, cached_property
 
 from renormalizer.mps.mpo import Mpo
-from renormalizer.mps import Mps
+from renormalizer.mps import Mps, MpDm
 from renormalizer.mps.mps import adaptive_tdvp, expand_bond_dimension_general
 from renormalizer.mps.lib import Environ, _sum
 from renormalizer.lib import solve_ivp, expm_krylov
@@ -73,15 +73,40 @@ class MultisetMps:
     """
     Docstring for MultisetMps
     """
-    def __init__(self, msmodel, N_electron: int):
+    def __init__(
+        self,
+        msmodel,
+        N_electron: int,
+        temperature: Quantity = Quantity(0, "K"),
+        init_model: Model = None,
+    ):
         self.MsModel = msmodel
         self.N_electron = N_electron
         self.msmps = [[] for _ in range(self.N_electron)] 
+        self.temperature = temperature
+        self.init_model = self.MsModel[0][0] if init_model is None else init_model
         self._ConstructMsMps()
 
     def _ConstructMsMps(self):
+        init_mp = self.init_mp()
         for i in range(self.N_electron):
-            self.msmps[i]=Mps.hartree_product_state(model=self.MsModel[i][i])
+            self.msmps[i] = init_mp.copy()
+
+    def init_mp(self):
+        if self.temperature == 0:
+            return Mps.hartree_product_state(model=self.init_model)
+
+        beta = self.temperature.to_beta()
+        condition = {}
+        for isite, basis in enumerate(self.init_model.basis):
+            if not isinstance(basis, BasisSHO):
+                continue
+            weights = np.exp(-0.5 * beta * basis.omega * np.arange(basis.nbas, dtype=float))
+            weights /= np.linalg.norm(weights)
+            condition[basis.dof] = weights
+
+        thermal_mps = Mps.hartree_product_state(model=self.init_model, condition=condition)
+        return MpDm.from_mps(thermal_mps)
     
     def copy(self) -> "MultisetMps":
         """  
@@ -90,6 +115,8 @@ class MultisetMps:
         new = MultisetMps.__new__(MultisetMps)
         new.MsModel = self.MsModel
         new.N_electron = self.N_electron
+        new.temperature = self.temperature
+        new.init_model = self.init_model
         new.msmps = [m.copy() for m in self.msmps]   
         return new
 
@@ -100,6 +127,8 @@ class MultisetMps:
         new = MultisetMps.__new__(MultisetMps)
         new.MsModel = self.MsModel
         new.N_electron = self.N_electron
+        new.temperature = self.temperature
+        new.init_model = self.init_model
         new.msmps = [m.to_complex() for m in self.msmps] 
         return new
 
@@ -146,6 +175,7 @@ class MultisetMps:
 class MultisetModel:
     def __init__(self, model: Model, max_bonddim, temperature: Quantity = Quantity(0,"K")): 
         self.model = model
+        self.temperature = temperature
         self.evolve_config: EvolveConfig = EvolveConfig(method=MsEvolveMethod.ms_evolve_tdvp_ps)
         self.compress_config: CompressConfig  = CompressConfig(CompressCriteria.fixed, max_bonddim=max_bonddim)
         self.N_electron = self.model.ham_terms[-1].dofs[0] + 1 # This may consult bug!!! 
@@ -158,6 +188,7 @@ class MultisetModel:
         #     print(self.model.ham_terms[i])
 
         self.SplitHamTerm()
+        self.ConstructInitModel()
 
         # for i in range(self.N_electron):
         #     for j in range(self.N_electron):
@@ -168,7 +199,12 @@ class MultisetModel:
         self.ConstructMsModel()
 
         self.MsMpo = MultisetMpo(self.MsModel,self.N_electron)
-        self.MsMps = MultisetMps(self.MsModel,self.N_electron)
+        self.MsMps = MultisetMps(
+            self.MsModel,
+            self.N_electron,
+            temperature=self.temperature,
+            init_model=self.init_model,
+        )
         self.MsMps.ms_normalize("mps_only")
         self.cdd_init_mps()
     
@@ -223,6 +259,13 @@ class MultisetModel:
         for i in range(self.N_electron):
             for j in range(self.N_electron):
                 self.MsModel[i][j] = Model(basis=self.basis_set, ham_terms=self.MsOp[i][j])
+
+    def ConstructInitModel(self):
+        init_terms = []
+        for op in self.model.ham_terms:
+            if len(op.dofs) == 1:
+                init_terms.append(self._reset_all_MsOp(op))
+        self.init_model = Model(basis=self.basis_set, ham_terms=init_terms)
 
     def evolve(self, evolve_dt, normalize=True):
 
@@ -724,6 +767,12 @@ class MultisetModel:
             Step 2: ⊗W   →  "ncelf, nbdef -> ncdlb" (contract over e, f)
             Step 3: ⊗L   →  "ncdlb, nabc -> nadl"   (contract over c, b)
 
+        For nsite=1 with ancilla (finite-T MpDm local tensor): 3 einsums per group
+            "abc, bdef, lfk, cegk -> adgl" decomposed as:
+            Step 1: Y⊗R  →  "ncegk, nlfk -> nceglf" (contract over k)
+            Step 2: ⊗W   →  "nceglf, nbdef -> ncglbd" (contract over e, f)
+            Step 3: ⊗L   →  "ncglbd, nabc -> nadgl" (contract over c, b)
+
         For nsite=0 (reverse U/C): 2 einsums per group
             "abc, lbk, ck -> al" decomposed as:
             Step 1: Y⊗R  →  "nck, nlbk -> nclb"     (contract over k)
@@ -746,12 +795,21 @@ class MultisetModel:
 
             if nsite == 1:
                 W_all = group['W']
-                Y_exp = Y_exp.reshape(n_pairs, shape[0], shape[1], shape[2])
-
-                temp = xp.einsum('ncek,nlfk->ncelf', Y_exp, R_all)
-                temp2 = xp.einsum('ncelf,nbdef->ncdlb', temp, W_all)
-                out = xp.einsum('ncdlb,nabc->nadl', temp2, L_all)
+                if len(shape) == 3:
+                    Y_exp = Y_exp.reshape(n_pairs, shape[0], shape[1], shape[2])
+                    temp = xp.einsum('ncek,nlfk->ncelf', Y_exp, R_all)
+                    temp2 = xp.einsum('ncelf,nbdef->ncdlb', temp, W_all)
+                    out = xp.einsum('ncdlb,nabc->nadl', temp2, L_all)
+                elif len(shape) == 4:
+                    Y_exp = Y_exp.reshape(n_pairs, shape[0], shape[1], shape[2], shape[3])
+                    temp = xp.einsum('ncegk,nlfk->nceglf', Y_exp, R_all)
+                    temp2 = xp.einsum('nceglf,nbdef->ncglbd', temp, W_all)
+                    out = xp.einsum('ncglbd,nabc->nadgl', temp2, L_all)
+                else:
+                    raise ValueError(f"Unsupported local tensor shape for nsite=1: {shape}")
             else:
+                if len(shape) != 2:
+                    raise ValueError(f"Unsupported local tensor shape for nsite=0: {shape}")
                 Y_exp = Y_exp.reshape(n_pairs, shape[0], shape[1])
 
                 temp = xp.einsum('nck,nlbk->nclb', Y_exp, R_all)
@@ -763,4 +821,3 @@ class MultisetModel:
 
         self._matvec_calls += 1
         return Y_out.ravel()
-

@@ -8,10 +8,14 @@ from renormalizer.utils import Quantity, EvolveConfig, CompressConfig, CompressC
 from renormalizer.utils.constant import cm2au
 from renormalizer.transport import ChargeDiffusionDynamics, InitElectron
 
+from renormalizer.model.multiset_model import MultisetModel
 import numpy as np
 
-log.init_log(logging.INFO)
+import sys
+from renormalizer.utils.log import package_logger as logger
 
+import pandas as pd
+from datetime import datetime
 
 with open("/curie-home/zengjj/Renormalizer/example/fmo_sdf.json") as fin:
     # a 107*2 matrix
@@ -53,12 +57,26 @@ if __name__ == "__main__":
     # starts from 1
     mol_arangement = np.array([7, 5, 3, 1, 2, 4, 6]) - 1
     model = HolsteinModel(list(np.array(mlist)[mol_arangement]), j_matrix_au[mol_arangement][:, mol_arangement], )
-    
+
+    max_bonddim = 128
     evolve_dt = 160
-    evolve_config = EvolveConfig(EvolveMethod.tdvp_ps, guess_dt=evolve_dt)
-    compress_config = CompressConfig(CompressCriteria.fixed, max_bonddim=16)
-    ct = ChargeDiffusionDynamics(model, temperature=Quantity(300,"K"),evolve_config=evolve_config, compress_config=compress_config, init_electron=InitElectron.fc)
-    ct.dump_dir = "./"
-    ct.job_name = 'fmo_300k_16bd'
-    ct.stop_at_edge = False
-    ct.evolve(evolve_dt=evolve_dt, evolve_time=40000)
+    multisetmodel = MultisetModel(model, max_bonddim=max_bonddim, temperature=Quantity(300,"K"))
+
+    from renormalizer.mps.backend import USE_GPU, xp  
+
+    logger.info(f"GPU enabled: {USE_GPU}")  
+    logger.info(f"Backend: {'CuPy' if USE_GPU else 'NumPy'}")
+    logger.info("maximum bond dimension:%d, evolve time step:%d", max_bonddim, evolve_dt)
+
+    populations = []
+    for i in range(250):
+
+        population = multisetmodel.popultation()
+        logger.info("%dth population: %s", i, population)
+        populations.append(population)
+        multisetmodel.evolve(evolve_dt=evolve_dt)
+
+    pd.DataFrame(populations).to_excel(datetime.now().strftime("%Y-%m-%d-%H%M_FMO") + str(max_bonddim) +'bd_' + str(evolve_dt) + "t.xlsx",
+                                index=False, header=False)    
+
+

@@ -40,7 +40,7 @@ model = HolsteinModel(
     periodic=False     # 开放边界条件（若需周期边界改为 True）  
 )  
   
-max_bonddim = 16
+max_bonddim = 8
 evolve_dt = 0.1
 multisetmodel = MultisetModel(model, max_bonddim=max_bonddim)
 

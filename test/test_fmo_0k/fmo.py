@@ -59,7 +59,7 @@ if __name__ == "__main__":
     model = HolsteinModel(list(np.array(mlist)[mol_arangement]), j_matrix_au[mol_arangement][:, mol_arangement], )
 
     max_bonddim = 64
-    evolve_dt = 80
+    evolve_dt = 1280
     multisetmodel = MultisetModel(model, max_bonddim=max_bonddim)
 
     from renormalizer.mps.backend import USE_GPU, xp  
@@ -69,7 +69,7 @@ if __name__ == "__main__":
     logger.info("maximum bond dimension:%d, evolve time step:%d", max_bonddim, evolve_dt)
 
     populations = []
-    for i in range(250):
+    for i in range(32):
 
         population = multisetmodel.popultation()
         logger.info("%dth population: %s", i, population)
