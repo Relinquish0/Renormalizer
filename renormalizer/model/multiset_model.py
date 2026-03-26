@@ -79,34 +79,58 @@ class MultisetMps:
         N_electron: int,
         temperature: Quantity = Quantity(0, "K"),
         init_model: Model = None,
+        method: str = "thermo_field",
     ):
         self.MsModel = msmodel
         self.N_electron = N_electron
         self.msmps = [[] for _ in range(self.N_electron)] 
         self.temperature = temperature
         self.init_model = self.MsModel[0][0] if init_model is None else init_model
+        self.method = method
         self._ConstructMsMps()
 
     def _ConstructMsMps(self):
-        init_mp = self.init_mp()
+        init_mp = self.init_mp(method=self.method)
         for i in range(self.N_electron):
             self.msmps[i] = init_mp.copy()
 
-    def init_mp(self):
+    def _thermal_coefficients_from_theta(self, basis: BasisSHO):
+        ratio = np.exp(-0.5 * self.temperature.to_beta() * basis.omega)
+        ratio = np.clip(ratio, 0.0, 1.0 - np.finfo(float).eps)
+        theta = np.arctanh(ratio)
+        weights = np.tanh(theta) ** np.arange(basis.nbas, dtype=float)
+        weights /= np.cosh(theta)
+        weights /= np.linalg.norm(weights)
+        return weights
+
+    def _build_thermal_field_mp(self):
+        condition = {}
+        for basis in self.init_model.basis:
+            if not isinstance(basis, BasisSHO):
+                continue
+            condition[basis.dof] = self._thermal_coefficients_from_theta(basis)
+        thermal_mps = Mps.hartree_product_state(model=self.init_model, condition=condition)
+        return MpDm.from_mps(thermal_mps)
+
+    def init_mp(self, method="thermo_field"):
         if self.temperature == 0:
             return Mps.hartree_product_state(model=self.init_model)
 
-        beta = self.temperature.to_beta()
-        condition = {}
-        for isite, basis in enumerate(self.init_model.basis):
-            if not isinstance(basis, BasisSHO):
-                continue
-            weights = np.exp(-0.5 * beta * basis.omega * np.arange(basis.nbas, dtype=float))
-            weights /= np.linalg.norm(weights)
-            condition[basis.dof] = weights
-
-        thermal_mps = Mps.hartree_product_state(model=self.init_model, condition=condition)
-        return MpDm.from_mps(thermal_mps)
+        logger.info(f"Initialising multiset finite-temperature state with {method}")
+        if method in ["imaginary_time", "imaginary time"]:
+            beta = self.temperature.to_beta()
+            condition = {}
+            for basis in self.init_model.basis:
+                if not isinstance(basis, BasisSHO):
+                    continue
+                weights = np.exp(-0.5 * beta * basis.omega * np.arange(basis.nbas, dtype=float))
+                weights /= np.linalg.norm(weights)
+                condition[basis.dof] = weights
+            thermal_mps = Mps.hartree_product_state(model=self.init_model, condition=condition)
+            return MpDm.from_mps(thermal_mps)
+        elif method in ["thermo_field", "thermofield"]:
+            return self._build_thermal_field_mp()
+        raise ValueError(f"Unsupported finite-temperature method: {method}")
     
     def copy(self) -> "MultisetMps":
         """  
@@ -117,6 +141,7 @@ class MultisetMps:
         new.N_electron = self.N_electron
         new.temperature = self.temperature
         new.init_model = self.init_model
+        new.method = self.method
         new.msmps = [m.copy() for m in self.msmps]   
         return new
 
@@ -129,6 +154,7 @@ class MultisetMps:
         new.N_electron = self.N_electron
         new.temperature = self.temperature
         new.init_model = self.init_model
+        new.method = self.method
         new.msmps = [m.to_complex() for m in self.msmps] 
         return new
 
@@ -173,9 +199,16 @@ class MultisetMps:
             raise ValueError(f"kind={kind} is not valid.")
 
 class MultisetModel:
-    def __init__(self, model: Model, max_bonddim, temperature: Quantity = Quantity(0,"K")): 
+    def __init__(
+        self,
+        model: Model,
+        max_bonddim,
+        temperature: Quantity = Quantity(0, "K"),
+        method: str = "thermo_field",
+    ): 
         self.model = model
         self.temperature = temperature
+        self.method = method
         self.evolve_config: EvolveConfig = EvolveConfig(method=MsEvolveMethod.ms_evolve_tdvp_ps)
         self.compress_config: CompressConfig  = CompressConfig(CompressCriteria.fixed, max_bonddim=max_bonddim)
         self.N_electron = self.model.ham_terms[-1].dofs[0] + 1 # This may consult bug!!! 
@@ -204,6 +237,7 @@ class MultisetModel:
             self.N_electron,
             temperature=self.temperature,
             init_model=self.init_model,
+            method=self.method,
         )
         self.MsMps.ms_normalize("mps_only")
         self.cdd_init_mps()
