@@ -13,7 +13,7 @@ import numpy as np
 log.init_log(logging.INFO)
 
 
-with open("/curie-home/zengjj/Renormalizer/example/fmo_sdf.json") as fin:
+with open("../../../example/fmo_sdf.json") as fin:
     # a 107*2 matrix
     sdf_values = json.load(fin)
 sdf_values = np.array(sdf_values)

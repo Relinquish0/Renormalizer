@@ -6,7 +6,7 @@ from renormalizer.utils import Quantity, EvolveConfig, CompressConfig, CompressC
 from renormalizer.utils.constant import cm2au
 from renormalizer.transport import ChargeDiffusionDynamics, InitElectron
 from renormalizer.utils.log import package_logger as logger
-from renormalizer.model.multiset_model import MultisetModel
+from renormalizer.multiset import MultisetChargeDiffusionDynamics
 
 import numpy as np
 import pandas as pd 
@@ -27,7 +27,7 @@ displacement = g * np.sqrt(2.0 / omega_0)  # = 1.5 * sqrt(2) ≈ 2.121
 ph = Phonon.simple_phonon(  
     Quantity(omega_0),       # ω₀ = 1 a.u.    
     Quantity(displacement),  # 位移 d ≈ 2.121 a.u.    
-    5                        # n_phys_dim = 4  
+    4                        # n_phys_dim = 4  
 )
   
 # ── 第二步：构建分子（每个格点一个电子 + 一个声子模式）──  
@@ -44,20 +44,22 @@ model = HolsteinModel(
   
 max_bonddim = 16
 evolve_dt = 0.1
-multisetmodel = MultisetModel(model, max_bonddim=max_bonddim)
+n_snapshots = 100
+dynamics_job = MultisetChargeDiffusionDynamics(
+    model=model,
+    max_bonddim=max_bonddim,
+    stop_at_edge=False,
+)
 
 from renormalizer.mps.backend import USE_GPU, xp  
 
 logger.info(f"GPU enabled: {USE_GPU}")  
 logger.info(f"Backend: {'CuPy' if USE_GPU else 'NumPy'}")
 logger.info("maximum bond dimension:%d, evolve time step:%d", max_bonddim, evolve_dt)
+logger.info("number of stored snapshots:%d", n_snapshots)
 
-populations = []
-for i in range(100):
-
-    population = multisetmodel.popultation()
-    logger.info("%dth population: %s", i, population)
-    populations.append(population)
-    multisetmodel.evolve(evolve_dt=evolve_dt)
+logger.info("0th population: %s", dynamics_job.e_occupations_array[0])
+dynamics_job.evolve(evolve_dt=evolve_dt, nsteps=n_snapshots - 1)
+populations = np.array(dynamics_job.e_occupations_array)
 pd.DataFrame(populations).to_excel(datetime.now().strftime("%Y-%m-%d-%H%M_Holstein_5") + str(max_bonddim) +'bd_' + str(evolve_dt) + "t.xlsx",
                             index=False, header=False)    

@@ -1,12 +1,12 @@
 #!/bin/bash
-#SBATCH --job-name=fmo_300k_128bd
+#SBATCH --job-name=fmo_300k_64bd
 #SBATCH --nodes=1
 #SBATCH --ntasks=1        # Nodes * GPUs-per-node * Ranks-per-GPU
 #SBATCH --gpus-per-node=1   # Specify the GPUs-per-node
-#SBATCH -p 4V100
+#SBATCH -p 4A100,4V100
 #SBATCH --qos=normal          # Depending on your needs
-#SBATCH --output=fmo_300k_128bd.log
-#SBATCH --error=fmo_300k_128bd.log
+#SBATCH --output=fmo_300k_64bd.log
+#SBATCH --error=fmo_300k_64bd.log
 
 source $HOME/.bashrc
 source /software/envs/anaconda3.env

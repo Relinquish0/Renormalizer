@@ -5,7 +5,7 @@ from renormalizer.model import Phonon, Mol, HolsteinModel
 from renormalizer.utils import Quantity, EvolveConfig, CompressConfig, CompressCriteria, EvolveMethod, log
 from renormalizer.utils.constant import cm2au
 from renormalizer.transport import ChargeDiffusionDynamics, InitElectron
-from renormalizer.model.multiset_model import MultisetModel
+from renormalizer.multiset import MultisetChargeDiffusionDynamics
 
 import numpy as np
 import pandas as pd
@@ -40,22 +40,24 @@ model = HolsteinModel(
     periodic=False     # 开放边界条件（若需周期边界改为 True）  
 )  
   
-max_bonddim = 8
+max_bonddim = 32
 evolve_dt = 0.1
-multisetmodel = MultisetModel(model, max_bonddim=max_bonddim)
+n_snapshots = 500
+dynamics_job = MultisetChargeDiffusionDynamics(
+    model=model,
+    max_bonddim=max_bonddim,
+    stop_at_edge=False,
+)
 
 from renormalizer.mps.backend import USE_GPU, xp  
 
 logger.info(f"GPU enabled: {USE_GPU}")  
 logger.info(f"Backend: {'CuPy' if USE_GPU else 'NumPy'}")
 logger.info("maximum bond dimension:%d, evolve time step:%d", max_bonddim, evolve_dt)
+logger.info("number of stored snapshots:%d", n_snapshots)
 
-populations = []
-for i in range(500):
-
-    population = multisetmodel.popultation()
-    logger.info("%dth population: %s", i, population)
-    populations.append(population)
-    multisetmodel.evolve(evolve_dt=evolve_dt)
+logger.info("0th population: %s", dynamics_job.e_occupations_array[0])
+dynamics_job.evolve(evolve_dt=evolve_dt, nsteps=n_snapshots - 1)
+populations = np.array(dynamics_job.e_occupations_array)
 pd.DataFrame(populations).to_excel(datetime.now().strftime("%Y-%m-%d-%H%M_FMO") + str(max_bonddim) +'bd_' + str(evolve_dt) + "t.xlsx",
                             index=False, header=False)    

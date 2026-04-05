@@ -8,16 +8,12 @@ from renormalizer.utils import Quantity, EvolveConfig, CompressConfig, CompressC
 from renormalizer.utils.constant import cm2au
 from renormalizer.transport import ChargeDiffusionDynamics, InitElectron
 
-from renormalizer.multiset import MultisetChargeDiffusionDynamics
 import numpy as np
 
-import sys
-from renormalizer.utils.log import package_logger as logger
+log.init_log(logging.INFO)
 
-import pandas as pd
-from datetime import datetime
 
-with open("/curie-home/zengjj/Renormalizer/example/fmo_sdf.json") as fin:
+with open("../../../example/fmo_sdf.json") as fin:
     # a 107*2 matrix
     sdf_values = json.load(fin)
 sdf_values = np.array(sdf_values)
@@ -57,27 +53,12 @@ if __name__ == "__main__":
     # starts from 1
     mol_arangement = np.array([7, 5, 3, 1, 2, 4, 6]) - 1
     model = HolsteinModel(list(np.array(mlist)[mol_arangement]), j_matrix_au[mol_arangement][:, mol_arangement], )
-
-    max_bonddim = 64
+    
     evolve_dt = 160
-    n_snapshots = 250
-    dynamics_job = MultisetChargeDiffusionDynamics(
-        model=model,
-        max_bonddim=max_bonddim,
-        temperature=Quantity(300, "K"),
-        stop_at_edge=False,
-    )
-
-    from renormalizer.mps.backend import USE_GPU, xp  
-
-    logger.info(f"GPU enabled: {USE_GPU}")  
-    logger.info(f"Backend: {'CuPy' if USE_GPU else 'NumPy'}")
-    logger.info("maximum bond dimension:%d, evolve time step:%d", max_bonddim, evolve_dt)
-    logger.info("number of stored snapshots:%d", n_snapshots)
-
-    logger.info("0th population: %s", dynamics_job.e_occupations_array[0])
-    dynamics_job.evolve(evolve_dt=evolve_dt, nsteps=n_snapshots - 1)
-    populations = np.array(dynamics_job.e_occupations_array)
-
-    pd.DataFrame(populations).to_excel(datetime.now().strftime("%Y-%m-%d-%H%M_FMO") + str(max_bonddim) +'bd_' + str(evolve_dt) + "t.xlsx",
-                                index=False, header=False)    
+    evolve_config = EvolveConfig(EvolveMethod.tdvp_ps, guess_dt=evolve_dt)
+    compress_config = CompressConfig(CompressCriteria.fixed, max_bonddim=128)
+    ct = ChargeDiffusionDynamics(model,evolve_config=evolve_config, compress_config=compress_config, init_electron=InitElectron.fc)
+    ct.dump_dir = "./"
+    ct.job_name = 'fmo'
+    ct.stop_at_edge = False
+    ct.evolve(evolve_dt=evolve_dt, evolve_time=40000)

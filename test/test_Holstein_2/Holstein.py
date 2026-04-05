@@ -9,10 +9,11 @@ from renormalizer.model import Phonon, Mol, HolsteinModel
 from renormalizer.utils import Quantity, EvolveConfig, CompressConfig, CompressCriteria, EvolveMethod, log
 from renormalizer.utils.constant import cm2au
 from renormalizer.transport import ChargeDiffusionDynamics, InitElectron
+from renormalizer.multiset import MultisetChargeDiffusionDynamics
 
 import numpy as np
 
-from renormalizer.model.multiset_model import MultisetModel
+from renormalizer.multiset import MultisetModel
 
 from renormalizer.utils.log import package_logger as logger
 import sys
@@ -57,36 +58,30 @@ if __name__ == "__main__":
     
     max_bonddim = 4
     evolve_dt = 160
+    n_snapshots = 10
+    dynamics_job = MultisetChargeDiffusionDynamics(
+        model=model,
+        max_bonddim=max_bonddim,
+        temperature=Quantity(0, "K"),
+        stop_at_edge=False,
+        dump_dir = "./",
+        job_name = 'Holstein2'
+    )
+
+    from renormalizer.mps.backend import USE_GPU, xp  
+
+    logger.info(f"GPU enabled: {USE_GPU}")  
+    logger.info(f"Backend: {'CuPy' if USE_GPU else 'NumPy'}")
     logger.info("maximum bond dimension:%d, evolve time step:%d", max_bonddim, evolve_dt)
-    multisetmodel = MultisetModel(model=model, max_bonddim=max_bonddim)
+    logger.info("number of stored snapshots:%d", n_snapshots)
 
-    print(f"GPU enabled: {USE_GPU}")  
-    print(f"Backend: {'CuPy' if USE_GPU else 'NumPy'}")
+    logger.info("0th population: %s", dynamics_job.e_occupations_array[0])
+    dynamics_job.evolve(evolve_dt=evolve_dt, nsteps=n_snapshots - 1)
+
+    populations = np.array(dynamics_job.e_occupations_array)
+
+    pd.DataFrame(populations).to_excel(datetime.now().strftime("%Y-%m-%d-%H%M_FMO") + str(max_bonddim) +'bd_' + str(evolve_dt) + "t.xlsx",
+                                index=False, header=False)    
     
-    populations = []
-
-    for i in range(10):
-        logger.info("%d population: %s Hamiltonian: %s", i, multisetmodel.popultation(), multisetmodel.Hamiltonian())
-        populations.append(multisetmodel.popultation())
-        multisetmodel.evolve(evolve_dt=evolve_dt)
-    print("_ivp_calls:",multisetmodel._ivp_calls)
-    print("_matvec_calls:",multisetmodel._matvec_calls)
-    # pd.DataFrame(populations).to_excel(datetime.now().strftime("%Y-%m-%d-%H:%M_Holstein") + str(max_bonddim) +'bd_' + str(evolve_dt) + "t.xlsx",
-    #                         index=False, header=False)
-    '''
-
-    evolve_dt = 160
-    evolve_config = EvolveConfig(EvolveMethod.tdvp_ps, guess_dt=evolve_dt)
-    compress_config = CompressConfig(CompressCriteria.fixed, max_bonddim=32)
-
-
-    ct = ChargeDiffusionDynamics(model, evolve_config=evolve_config, compress_config=compress_config, init_electron=InitElectron.fc)
-    ct.dump_dir = "./"
-    ct.job_name = 'Holstein_benchmark'
-    ct.stop_at_edge = False
-    ct.evolve(evolve_dt=evolve_dt, evolve_time=2000)
-    ''' 
-    
-
 
 
