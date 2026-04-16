@@ -6,7 +6,6 @@ from enum import Enum
 
 import numpy as np
 
-from renormalizer.model.basis import BasisSHO
 from renormalizer.model.model import Model
 from renormalizer.mps import MpDm, Mps
 from renormalizer.mps.lib import _sum
@@ -31,57 +30,35 @@ class MultisetMps:
         temperature: Quantity = Quantity(0, "K"),
         init_model: Model = None,
         method: str = "thermo_field",
+        init_mp=None,
+        msmps=None,
     ):
+        if init_mp is not None and msmps is not None:
+            raise ValueError("Only one of `init_mp` and `msmps` can be provided.")
+        if init_mp is None and msmps is None:
+            raise ValueError("Either `init_mp` or `msmps` should be provided.")
         self.MsModel = msmodel
         self.N_electron = N_electron
         self.msmps = [[] for _ in range(self.N_electron)]
         self.temperature = temperature
         self.init_model = self.MsModel[0][0] if init_model is None else init_model
         self.method = method
+        self._init_mp = init_mp
+        self._input_msmps = msmps
         self._ConstructMsMps()
 
     def _ConstructMsMps(self):
-        init_mp = self.init_mp(method=self.method)
+        if self._input_msmps is not None:
+            if len(self._input_msmps) != self.N_electron:
+                raise ValueError(
+                    f"`msmps` should contain {self.N_electron} states. Got {len(self._input_msmps)}."
+                )
+            self.msmps = [mps.copy() for mps in self._input_msmps]
+            return
+
+        init_mp = self._init_mp
         for i in range(self.N_electron):
             self.msmps[i] = init_mp.copy()
-
-    def _thermal_coefficients_from_theta(self, basis: BasisSHO):
-        ratio = np.exp(-0.5 * self.temperature.to_beta() * basis.omega)
-        ratio = np.clip(ratio, 0.0, 1.0 - np.finfo(float).eps)
-        theta = np.arctanh(ratio)
-        weights = np.tanh(theta) ** np.arange(basis.nbas, dtype=float)
-        weights /= np.cosh(theta)
-        weights /= np.linalg.norm(weights)
-        return weights
-
-    def _build_thermal_field_mp(self):
-        condition = {}
-        for basis in self.init_model.basis:
-            if not isinstance(basis, BasisSHO):
-                continue
-            condition[basis.dof] = self._thermal_coefficients_from_theta(basis)
-        thermal_mps = Mps.hartree_product_state(model=self.init_model, condition=condition)
-        return MpDm.from_mps(thermal_mps)
-
-    def init_mp(self, method="thermo_field"):
-        if self.temperature == 0:
-            return Mps.hartree_product_state(model=self.init_model)
-
-        logger.info(f"Initialising multiset finite-temperature state with {method}")
-        if method in ["imaginary_time", "imaginary time"]:
-            beta = self.temperature.to_beta()
-            condition = {}
-            for basis in self.init_model.basis:
-                if not isinstance(basis, BasisSHO):
-                    continue
-                weights = np.exp(-0.5 * beta * basis.omega * np.arange(basis.nbas, dtype=float))
-                weights /= np.linalg.norm(weights)
-                condition[basis.dof] = weights
-            thermal_mps = Mps.hartree_product_state(model=self.init_model, condition=condition)
-            return MpDm.from_mps(thermal_mps)
-        elif method in ["thermo_field", "thermofield"]:
-            return self._build_thermal_field_mp()
-        raise ValueError(f"Unsupported finite-temperature method: {method}")
 
     def copy(self) -> "MultisetMps":
         """

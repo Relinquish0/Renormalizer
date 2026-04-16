@@ -21,7 +21,7 @@ import sys
 import pandas as pd
 from datetime import datetime
 
-with open("/curie-home/zengjj/Renormalizer/example/fmo_sdf.json") as fin:
+with open("../../example/fmo_sdf.json") as fin:
     # a 107*2 matrix
     sdf_values = json.load(fin)
 sdf_values = np.array(sdf_values)
@@ -83,5 +83,4 @@ if __name__ == "__main__":
     pd.DataFrame(populations).to_excel(datetime.now().strftime("%Y-%m-%d-%H%M_FMO") + str(max_bonddim) +'bd_' + str(evolve_dt) + "t.xlsx",
                                 index=False, header=False)    
     
-
 

@@ -1,12 +1,12 @@
 #!/bin/bash
-#SBATCH --job-name=fmo_16bd
+#SBATCH --job-name=pbi_hexmer_expand
 #SBATCH --nodes=1
 #SBATCH --ntasks=1        # Nodes * GPUs-per-node * Ranks-per-GPU
 #SBATCH --gpus-per-node=1   # Specify the GPUs-per-node
 #SBATCH -p 4A100,4V100
 #SBATCH --qos=normal          # Depending on your needs
-#SBATCH --output=fmo_16bd_itp.log
-#SBATCH --error=fmo_16bd_itp.log
+#SBATCH --output=pbi_hexmer_expand.log
+#SBATCH --error=pbi_hexmer_expand.log
 
 source $HOME/.bashrc
 source /software/envs/anaconda3.env
@@ -28,7 +28,7 @@ echo "==============================="
 
 # 运行主要的Python任务
 echo "Starting"
-python fmo.py \
+python PBI.py \
 echo "Job completed with exit code: $?"
 
 echo "Ending"

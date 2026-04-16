@@ -7,16 +7,33 @@ from datetime import datetime
 import numpy as np
 from scipy import integrate
 
+from renormalizer.model.basis import BasisSHO
 from renormalizer.model.model import Model
-from renormalizer.mps import MpDm
+from renormalizer.mps import MpDm, Mps, ThermalProp
 from renormalizer.mps.mpo import Mpo
 from renormalizer.multiset.multiset_model import MultisetModel
 from renormalizer.multiset.multiset_mpo import MultisetBlockMpo
 from renormalizer.multiset.multiset_mps import MsEvolveMethod, MultisetMps
-from renormalizer.utils import CompressConfig, EvolveConfig, Quantity
+from renormalizer.utils import (
+    CompressConfig,
+    CompressCriteria,
+    EvolveConfig,
+    EvolveMethod,
+    Quantity,
+)
 from renormalizer.utils.constant import mobility2au
 
 logger = logging.getLogger(__name__)
+
+
+def _thermal_coefficients_from_theta(basis: BasisSHO, temperature: Quantity):
+    ratio = np.exp(-0.5 * temperature.to_beta() * basis.omega)
+    ratio = np.clip(ratio, 0.0, 1.0 - np.finfo(float).eps)
+    theta = np.arctanh(ratio)
+    weights = np.tanh(theta) ** np.arange(basis.nbas, dtype=float)
+    weights /= np.cosh(theta)
+    weights /= np.linalg.norm(weights)
+    return weights
 
 
 def _calc_r_square_multiset(e_occupations):
@@ -26,6 +43,14 @@ def _calc_r_square_multiset(e_occupations):
     r_mean_square = np.average(r_list, weights=e_occupations) ** 2
     mean_r_square = np.average(r_list**2, weights=e_occupations)
     return float(mean_r_square - r_mean_square)
+
+
+def _state_bond_dims(state):
+    if isinstance(state, MultisetMps):
+        return [list(mps.bond_dims) for mps in state.msmps]
+    if isinstance(state, (tuple, list)):
+        return [_state_bond_dims(item) for item in state]
+    return None
 
 
 class MultisetTdJob(object):
@@ -70,6 +95,9 @@ class MultisetTdJob(object):
 
         mps = self.init_mps()
         logger.info(f"Initial multiset state: {str(mps)}")
+        bond_dims = _state_bond_dims(mps)
+        if bond_dims is not None:
+            logger.info("Initial multiset bond dimensions: %s", bond_dims)
         if mps is None:
             raise ValueError("init_mps should return a multiset state. Got None")
         self.latest_mps = mps
@@ -200,6 +228,9 @@ class MultisetTdJob(object):
 
             if self.info_interval is not None and i % self.info_interval == 0:
                 mps_abstract = str(new_mps)
+                bond_dims = _state_bond_dims(new_mps)
+                if bond_dims is not None:
+                    mps_abstract += f" bond_dims={bond_dims}"
                 self._dump_mps = self.dump_mps
             else:
                 mps_abstract = ""
@@ -300,11 +331,108 @@ class MultisetChargeDiffusionDynamics(MultisetTdJob):
             job_name=job_name,
         )
 
+    def init_mp(self, method=None):
+        method = self.ms_model.method if method is None else method
+        if self.temperature == 0:
+            return Mps.hartree_product_state(model=self.ms_model.init_model)
+
+        logger.info(f"Initialising multiset finite-temperature state with {method}")
+        if method in ["imaginary_time_exact"]:
+            beta = self.temperature.to_beta()
+            condition = {}
+            for basis in self.ms_model.init_model.basis:
+                if not isinstance(basis, BasisSHO):
+                    continue
+                weights = np.exp(-0.5 * beta * basis.omega * np.arange(basis.nbas, dtype=float))
+                weights /= np.linalg.norm(weights)
+                condition[basis.dof] = weights
+            thermal_mps = Mps.hartree_product_state(model=self.ms_model.init_model, condition=condition)
+            return MpDm.from_mps(thermal_mps)
+
+        if method in ["thermo_field"]:
+            condition = {}
+            for basis in self.ms_model.init_model.basis:
+                if not isinstance(basis, BasisSHO):
+                    continue
+                condition[basis.dof] = _thermal_coefficients_from_theta(basis, self.temperature)
+            thermal_mps = Mps.hartree_product_state(model=self.ms_model.init_model, condition=condition)
+            return MpDm.from_mps(thermal_mps)
+
+        if method in ["imaginary_time_propagate"]:
+            local_state = MpDm.max_entangled_gs(self.ms_model.init_model)
+            # Keep the thermal purification in the minimal bond-dimension manifold.
+            thermal_compress_config = CompressConfig(
+                CompressCriteria.fixed,
+                max_bonddim=max(local_state.bond_dims),
+            )
+            local_state.compress_config = thermal_compress_config
+            tp = ThermalProp(
+                local_state,
+                evolve_config=EvolveConfig(method=EvolveMethod.prop_and_compress),
+                auto_expand=False,
+            )
+            tp.evolve(None, max(20, len(local_state)), self.temperature.to_beta() / 2j)
+            return tp.latest_mps
+
+        raise ValueError(f"Unsupported finite-temperature method: {method}")
+
+    def _init_msmps(self, local_state):
+        return MultisetMps(
+            self.ms_model.MsModel,
+            self.ms_model.N_electron,
+            temperature=self.temperature,
+            init_model=self.ms_model.init_model,
+            method=self.ms_model.method,
+            init_mp=local_state,
+        )
+
+    def _fc_excitation(self, state: MultisetMps, alpha: int):
+        for beta in range(state.N_electron):
+            if beta != alpha:
+                state.msmps[beta].scale(1e-10, inplace=True)
+        state.ms_normalize("mps_only")
+
+    def _set_hamiltonian_offset(self, energy):
+        if not isinstance(energy, Quantity):
+            energy = Quantity(energy)
+        for alpha in range(self.ms_model.N_electron):
+            for beta in range(self.ms_model.N_electron):
+                if len(self.ms_model.MsModel[alpha][beta].ham_terms) == 0:
+                    self.ms_model.MsMpo.msmpo[alpha][beta] = []
+                elif alpha == beta:
+                    self.ms_model.MsMpo.msmpo[alpha][beta] = Mpo(
+                        model=self.ms_model.MsModel[alpha][beta],
+                        terms=None,
+                        offset=energy,
+                    )
+                else:
+                    self.ms_model.MsMpo.msmpo[alpha][beta] = Mpo(
+                        model=self.ms_model.MsModel[alpha][beta],
+                        terms=None,
+                        offset=Quantity(0),
+                    )
+        self.ms_model._refresh_mpo_cache()
+
     def init_mps(self):
-        self.ms_model.reset_mps()
-        self.ms_model.cdd_init_mps(
-            initial_site=self.initial_site,
-            use_hint=self.use_init_hint,
+        state = self._init_msmps(self.init_mp())
+        self._fc_excitation(state, self.initial_site)
+
+        logger.debug(
+            f"[init] mp_norms after fc_excitation: "
+            f"{[state.msmps[a].mp_norm for a in range(self.ms_model.N_electron)]}"
+        )
+
+        self.ms_model.set_mps(state)
+        energy = Quantity(self.ms_model.Hamiltonian())
+        logger.debug(f"[init] E0 = {energy.as_au():.6f} a.u.")
+        self._set_hamiltonian_offset(energy)
+
+        self.ms_model.expand_bond_dimension_multiset(coef=1e-10, use_hint=self.use_init_hint)
+        self.ms_model.MsMps.ms_normalize("mps_only")
+
+        logger.debug(
+            f"[init] mp_norms after expand+normalize: "
+            f"{[self.ms_model.MsMps.msmps[a].mp_norm for a in range(self.ms_model.N_electron)]}"
         )
         return self.ms_model.MsMps
 
@@ -524,15 +652,31 @@ class MultisetTransportKubo(MultisetTdJob):
             return "imaginary_time"
         raise ValueError(f"Unsupported thermal_init_method: {self.thermal_init_method}")
 
+    def init_mp(self, method=None):
+        method = self._normalize_thermal_init_method() if method is None else method
+        if method == "thermo_field":
+            condition = {}
+            for basis in self.ms_model.init_model.basis:
+                if not isinstance(basis, BasisSHO):
+                    continue
+                condition[basis.dof] = _thermal_coefficients_from_theta(basis, self.temperature)
+            thermal_mps = Mps.hartree_product_state(model=self.ms_model.init_model, condition=condition)
+            return MpDm.from_mps(thermal_mps)
+        if method == "imaginary_time":
+            local_state = MpDm.max_entangled_gs(self.ms_model.init_model)
+            local_state.compress_config = self.compress_config
+            return local_state
+        raise ValueError(f"Unsupported thermal_init_method: {method}")
+
     def _broadcast_local_state(self, local_state):
-        ms_state = MultisetMps.__new__(MultisetMps)
-        ms_state.MsModel = self.ms_model.MsModel
-        ms_state.N_electron = self.ms_model.N_electron
-        ms_state.temperature = self.temperature
-        ms_state.init_model = self.ms_model.init_model
-        ms_state.method = self._normalize_thermal_init_method()
-        ms_state.msmps = [local_state.copy() for _ in range(self.ms_model.N_electron)]
-        return ms_state
+        return MultisetMps(
+            self.ms_model.MsModel,
+            self.ms_model.N_electron,
+            temperature=self.temperature,
+            init_model=self.ms_model.init_model,
+            method=self._normalize_thermal_init_method(),
+            init_mp=local_state,
+        )
 
     def _load_thermal_state(self):
         if self.thermal_dump_path is None:
@@ -551,19 +695,7 @@ class MultisetTransportKubo(MultisetTdJob):
 
     def _build_thermal_seed_state(self):
         method = self._normalize_thermal_init_method()
-        if method == "thermo_field":
-            state = MultisetMps(
-                self.ms_model.MsModel,
-                self.ms_model.N_electron,
-                temperature=self.temperature,
-                init_model=self.ms_model.init_model,
-                method="thermo_field",
-            )
-            state.ms_normalize("mps_only")
-            return state
-
-        local_state = MpDm.max_entangled_gs(self.ms_model.init_model)
-        local_state.compress_config = self.compress_config
+        local_state = self.init_mp(method=method)
         state = self._broadcast_local_state(local_state)
         state.ms_normalize("mps_only")
         return state
@@ -583,7 +715,8 @@ class MultisetTransportKubo(MultisetTdJob):
             self.ms_model.evolve_config = original_evolve_config
 
     def _set_hamiltonian_offset(self, energy):
-        energy = Quantity(energy)
+        if not isinstance(energy, Quantity):
+            energy = Quantity(energy)
         for alpha in range(self.ms_model.N_electron):
             for beta in range(self.ms_model.N_electron):
                 if len(self.ms_model.MsModel[alpha][beta].ham_terms) == 0:

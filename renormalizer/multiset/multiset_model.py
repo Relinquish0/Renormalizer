@@ -67,9 +67,12 @@ class MultisetModel:
         self._site_group_templates = []
         self._qr_qn_plan_cache = {}
         self._refresh_mpo_cache()
-        self.reset_mps()
+        self.MsMps = None
         if auto_init:
-            self.cdd_init_mps()
+            logger.info(
+                "MultisetModel no longer auto-initialises MsMps. "
+                "Initial states should be prepared explicitly by a MultisetTdJob subclass."
+            )
 
         self._matvec_calls = 0
         self._ivp_calls = 0
@@ -349,13 +352,15 @@ class MultisetModel:
             )
         return batched_groups
 
-    def reset_mps(self):
+    def reset_mps(self, init_mp=None, msmps=None):
         self.MsMps = MultisetMps(
             self.MsModel,
             self.N_electron,
             temperature=self.temperature,
             init_model=self.init_model,
             method=self.method,
+            init_mp=init_mp,
+            msmps=msmps,
         )
         self.MsMps.ms_normalize("mps_only")
         return self.MsMps
@@ -521,12 +526,6 @@ class MultisetModel:
 
         return ms_mps
 
-    def fc_excitation(self, alpha: int):
-        for beta in range(self.N_electron):
-            if beta != alpha:
-                self.MsMps.msmps[beta].scale(1e-10, inplace=True)
-        self.MsMps.ms_normalize("mps_only")
-
     def expand_bond_dimension_multiset(self, coef: float = 1e-10, use_hint: bool = True):
         for alpha in range(self.N_electron):
             self.MsMps.msmps[alpha].compress_config = self.compress_config
@@ -575,47 +574,7 @@ class MultisetModel:
             expanded.scale(float(abs(expanded.coeff)), inplace=True)
             expanded.coeff = 1.0
             self.MsMps.msmps[alpha] = expanded
-
-    def cdd_init_mps(self, initial_site: int = None, use_hint: bool = True):
-        if initial_site is None:
-            initial_site = self.N_electron // 2
-
-        self.fc_excitation(initial_site)
-
-        logger.debug(
-            f"[init] mp_norms after fc_excitation: "
-            f"{[self.MsMps.msmps[a].mp_norm for a in range(self.N_electron)]}"
-        )
-
-        energy = Quantity(self.Hamiltonian())
-        logger.debug(f"[init] E0 = {energy.as_au():.6f} a.u.")
-
-        for alpha in range(self.N_electron):
-            for beta in range(self.N_electron):
-                if len(self.MsModel[alpha][beta].ham_terms) == 0:
-                    self.MsMpo.msmpo[alpha][beta] = []
-                elif alpha == beta:
-                    self.MsMpo.msmpo[alpha][beta] = Mpo(
-                        model=self.MsModel[alpha][beta],
-                        terms=None,
-                        offset=energy,
-                    )
-                else:
-                    self.MsMpo.msmpo[alpha][beta] = Mpo(
-                        model=self.MsModel[alpha][beta],
-                        terms=None,
-                        offset=Quantity(0),
-                    )
-        self._refresh_mpo_cache()
-
-        self.expand_bond_dimension_multiset(coef=1e-10, use_hint=use_hint)
-        self.MsMps.ms_normalize("mps_only")
-
-        logger.debug(
-            f"[init] mp_norms after expand+normalize: "
-            f"{[self.MsMps.msmps[a].mp_norm for a in range(self.N_electron)]}"
-        )
-
+            
     def population(self):
         bras = [self.MsMps.msmps[a].conj() for a in range(self.N_electron)]
         return [bras[a].dot(self.MsMps.msmps[a]).real for a in range(self.N_electron)]

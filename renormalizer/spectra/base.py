@@ -31,7 +31,7 @@ class SpectraTdMpsJobBase(TdMpsJob):
         if compress_config is None:
             self.compress_config = CompressConfig()
         else:
-            self.compress_config = compress_config()
+            self.compress_config = compress_config
 
         self.temperature = temperature
         self.h_mpo: Mpo = Mpo(model, offset=offset)

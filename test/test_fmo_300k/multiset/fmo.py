@@ -17,7 +17,7 @@ from renormalizer.utils.log import package_logger as logger
 import pandas as pd
 from datetime import datetime
 
-with open("/curie-home/zengjj/Renormalizer/example/fmo_sdf.json") as fin:
+with open("../../../example/fmo_sdf.json") as fin:
     # a 107*2 matrix
     sdf_values = json.load(fin)
 sdf_values = np.array(sdf_values)
@@ -66,6 +66,7 @@ if __name__ == "__main__":
         max_bonddim=max_bonddim,
         temperature=Quantity(300, "K"),
         stop_at_edge=False,
+        method="imaginary_time_propagate"
     )
 
     from renormalizer.mps.backend import USE_GPU, xp  
@@ -76,7 +77,7 @@ if __name__ == "__main__":
     logger.info("number of stored snapshots:%d", n_snapshots)
 
     logger.info("0th population: %s", dynamics_job.e_occupations_array[0])
-    dynamics_job.evolve(evolve_dt=evolve_dt, nsteps=n_snapshots - 1)
+    dynamics_job.evolve(evolve_dt=evolve_dt, evolve_time=40000)
     populations = np.array(dynamics_job.e_occupations_array)
 
     pd.DataFrame(populations).to_excel(datetime.now().strftime("%Y-%m-%d-%H%M_FMO") + str(max_bonddim) +'bd_' + str(evolve_dt) + "t.xlsx",

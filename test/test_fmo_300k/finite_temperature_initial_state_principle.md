@@ -31,7 +31,7 @@
 
 ## 2. `singleset` 的实现
 
-`singleset` 的实现路径在 [dynamics.py](/curie-home/zengjj/Renormalizer/renormalizer/transport/dynamics.py#L173)。
+`singleset` 的实现路径在 [dynamics.py](../../renormalizer/transport/dynamics.py#L173)。
 
 它的流程是：
 
@@ -50,7 +50,7 @@
 
 ## 3. `multiset` 当前的参考初态模型
 
-当前 `multiset` 会先从完整模型中抽取一个仅用于热平衡初态制备的参考模型 `init_model`，对应代码在 [multiset_model.py](/curie-home/zengjj/Renormalizer/renormalizer/model/multiset_model.py#L263)。
+当前 `multiset` 会先从完整模型中抽取一个仅用于热平衡初态制备的参考模型 `init_model`，对应代码在 [multiset_model.py](../../renormalizer/model/multiset_model.py#L263)。
 
 这个 `init_model` 的构造方式是：
 
@@ -62,7 +62,7 @@
 
 ## 4. `multiset` 当前有限温初态的实现
 
-当前 `multiset` 的有限温初态在 [multiset_model.py](/curie-home/zengjj/Renormalizer/renormalizer/model/multiset_model.py#L95) 构造。
+当前 `multiset` 的有限温初态在 [multiset_model.py](../../renormalizer/model/multiset_model.py#L95) 构造。
 
 它没有显式调用：
 
