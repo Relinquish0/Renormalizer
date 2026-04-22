@@ -48,6 +48,8 @@ def _calc_r_square_multiset(e_occupations):
 def _state_bond_dims(state):
     if isinstance(state, MultisetMps):
         return [list(mps.bond_dims) for mps in state.msmps]
+    if hasattr(state, "bond_dims"):
+        return list(state.bond_dims)
     if isinstance(state, (tuple, list)):
         return [_state_bond_dims(item) for item in state]
     return None
@@ -319,6 +321,7 @@ class MultisetChargeDiffusionDynamics(MultisetTdJob):
         self.energies = []
         self.r_square_array = []
         self.e_occupations_array = []
+        self.ph_occupations_array = []
         self.reduced_density_matrices = []
         self.coherent_length_array = []
         self.purity_array = []
@@ -338,6 +341,7 @@ class MultisetChargeDiffusionDynamics(MultisetTdJob):
 
         logger.info(f"Initialising multiset finite-temperature state with {method}")
         if method in ["imaginary_time_exact"]:
+            logger.info("Purification method: imaginary_time_exact")
             beta = self.temperature.to_beta()
             condition = {}
             for basis in self.ms_model.init_model.basis:
@@ -350,6 +354,7 @@ class MultisetChargeDiffusionDynamics(MultisetTdJob):
             return MpDm.from_mps(thermal_mps)
 
         if method in ["thermo_field"]:
+            logger.info("Purification method: thermo_field_dynamics")
             condition = {}
             for basis in self.ms_model.init_model.basis:
                 if not isinstance(basis, BasisSHO):
@@ -359,24 +364,31 @@ class MultisetChargeDiffusionDynamics(MultisetTdJob):
             return MpDm.from_mps(thermal_mps)
 
         if method in ["imaginary_time_propagate"]:
+            logger.info("Purification method: imaginary_time_propagate")
             local_state = MpDm.max_entangled_gs(self.ms_model.init_model)
-            # Keep the thermal purification in the minimal bond-dimension manifold.
-            thermal_compress_config = CompressConfig(
+            icompress_config = CompressConfig(
                 CompressCriteria.fixed,
-                max_bonddim=max(local_state.bond_dims),
+                max_bonddim=1,
             )
-            local_state.compress_config = thermal_compress_config
+            local_state.compress_config = icompress_config
             tp = ThermalProp(
                 local_state,
-                evolve_config=EvolveConfig(method=EvolveMethod.prop_and_compress),
+                h_mpo_model=self.ms_model.init_model,
+                evolve_config=EvolveConfig(method=EvolveMethod.tdvp_ps),
                 auto_expand=False,
             )
-            tp.evolve(None, max(20, len(local_state)), self.temperature.to_beta() / 2j)
-            return tp.latest_mps
+            nsteps = max(20, len(local_state))
+            tp.evolve(None, nsteps, self.temperature.to_beta() / 2j)
+            thermal_state = tp.latest_mps
+            logger.info("[thermal init] imaginary-time tdvp bond dims: %s", thermal_state.bond_dims)
+            logger.info("[thermal init] ph occupations: %s", thermal_state.ph_occupations)
+            return thermal_state
 
         raise ValueError(f"Unsupported finite-temperature method: {method}")
 
     def _init_msmps(self, local_state):
+        if isinstance(local_state, MultisetMps):
+            return local_state
         return MultisetMps(
             self.ms_model.MsModel,
             self.ms_model.N_electron,
@@ -442,9 +454,10 @@ class MultisetChargeDiffusionDynamics(MultisetTdJob):
         energy = self.ms_model.Hamiltonian()
         self.energies.append(energy)
 
-        rho = self.ms_model.rho_el()
-        e_occupations = np.diag(rho).real
+        rho = mps.rho_el()
+        e_occupations = mps.e_occupations_multiset
         self.e_occupations_array.append(e_occupations)
+        self.ph_occupations_array.append(mps.ph_occupations_multiset)
         self.r_square_array.append(_calc_r_square_multiset(e_occupations))
         self.reduced_density_matrices.append(rho)
         self.coherent_length_array.append(np.abs(rho).sum() - np.trace(rho).real)
@@ -452,6 +465,7 @@ class MultisetChargeDiffusionDynamics(MultisetTdJob):
         self.purity_array.append(np.trace(rho @ rho).real)
 
         logger.info(f"e occupations: {self.e_occupations_array[-1]}")
+        logger.info(f"ph occupations: {self.ph_occupations_array[-1]}")
 
     def evolve_single_step(self, evolve_dt):
         new_mps = self.ms_model.evolve_state(self.latest_mps, evolve_dt)
@@ -473,6 +487,7 @@ class MultisetChargeDiffusionDynamics(MultisetTdJob):
         dump_dict["energy array"] = self.energies
         dump_dict["r square array"] = self.r_square_array
         dump_dict["electron occupations array"] = self.e_occupations_array
+        dump_dict["phonon occupations array"] = self.ph_occupations_array
         dump_dict["reduced density matrices"] = self.reduced_density_matrices
         dump_dict["coherent length array"] = self.coherent_length_array
         dump_dict["rho trace array"] = self.trace_array

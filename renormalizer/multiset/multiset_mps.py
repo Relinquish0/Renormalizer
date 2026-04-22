@@ -117,6 +117,34 @@ class MultisetMps:
         else:
             raise ValueError(f"kind={kind} is not valid.")
 
+    def rho_el(self):
+        rho = np.zeros((self.N_electron, self.N_electron), dtype=np.complex128)
+        for alpha in range(self.N_electron):
+            bra = self.msmps[alpha].conj()
+            for beta in range(self.N_electron):
+                rho[alpha, beta] = bra.dot(self.msmps[beta])
+        return rho
+
+    @property
+    def e_occupations_multiset(self):
+        return np.diag(self.rho_el()).real
+
+    @property
+    def ph_occupations_multiset(self):
+        ph_occupations = None
+        for mps in self.msmps:
+            occupations = np.asarray(mps.ph_occupations)
+            if ph_occupations is None:
+                ph_occupations = occupations.copy()
+            else:
+                ph_occupations = ph_occupations + occupations
+
+        if ph_occupations is None:
+            return np.array([])
+        if np.allclose(ph_occupations.imag, 0):
+            return ph_occupations.real
+        return ph_occupations
+
     def dump(self, fname):
         root, ext = os.path.splitext(fname)
         if ext == "":

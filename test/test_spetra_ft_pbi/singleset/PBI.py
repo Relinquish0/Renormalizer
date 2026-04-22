@@ -66,21 +66,26 @@ model = construct_model(type_)
 
 optimize_config = OptimizeConfig()  
 evolve_config = EvolveConfig(EvolveMethod.tdvp_ps, adaptive=False)  
-compress_config = CompressConfig(CompressCriteria.fixed, max_bonddim=42)  
+compress_config = CompressConfig(CompressCriteria.fixed, max_bonddim=120)  
   
 """
 insteps = 50
 offset = Quantity(2.13 - 0.086, "eV") + Quantity(model.gs_zpe)
-
 """
+
+spectratype = "abs"
+
+offset = Quantity(2.13, "eV") + Quantity(model.gs_zpe)
 
 spectra = SpectraFiniteT(  
     model=model,  # 使用您已有的model  
-    spectratype="abs",  # 或 "emi" 用于发射光谱  
+    spectratype=spectratype,  # 或 "emi" 用于发射光谱  
     temperature=Quantity(298,"K"),
     evolve_config=evolve_config,  
-    insteps = 1,
-    offset = Quantity(2.13, "eV") + Quantity(model.gs_zpe)
+    insteps = 50,
+    offset = offset,
+    compress_config = compress_config,
+    icompress_config = compress_config,
 )  
   
 spectra.evolve(evolve_dt=20, nsteps=5000)  
@@ -88,4 +93,4 @@ spectra.evolve(evolve_dt=20, nsteps=5000)
 autocorr = spectra.autocorr  # 这是计算得到的关联函数数组  
 time_points = spectra.evolve_times_array  # 对应的时间点  
 
-save_zerot_data(filename="pbi_{}_ft_chi42.npz".format(type_))
+save_zerot_data(filename="pbi_{}_ft_{}_{}bd.npz".format(type_,spectra.spectratype,compress_config.bond_dim_max_value))

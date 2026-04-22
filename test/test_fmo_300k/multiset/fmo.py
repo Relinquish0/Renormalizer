@@ -66,7 +66,9 @@ if __name__ == "__main__":
         max_bonddim=max_bonddim,
         temperature=Quantity(300, "K"),
         stop_at_edge=False,
-        method="imaginary_time_propagate"
+        method="imaginary_time_propagate",
+        dump_dir="./",
+        job_name="fmo_300K_{}bd".format(max_bonddim),
     )
 
     from renormalizer.mps.backend import USE_GPU, xp  

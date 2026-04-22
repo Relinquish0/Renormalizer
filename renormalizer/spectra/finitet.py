@@ -31,6 +31,7 @@ class SpectraFiniteT(SpectraTdMpsJobBase):
         insteps,
         offset,
         evolve_config=None,
+        compress_config = None,
         icompress_config=None,
         ievolve_config=None,
         gs_shift=0,
@@ -40,6 +41,7 @@ class SpectraFiniteT(SpectraTdMpsJobBase):
         self.temperature = temperature
         self.insteps = insteps
         self.gs_shift = gs_shift
+        self.compress_config = compress_config
         self.icompress_config = icompress_config
         self.ievolve_config = ievolve_config
         if self.icompress_config is None:
@@ -53,6 +55,7 @@ class SpectraFiniteT(SpectraTdMpsJobBase):
             spectratype,
             temperature,
             evolve_config=evolve_config,
+            compress_config=compress_config,
             offset=offset,
             dump_dir=dump_dir,
             job_name=job_name
@@ -121,6 +124,11 @@ class SpectraFiniteT(SpectraTdMpsJobBase):
         first_corr = corr[0]
         return np.abs(last_corr.mean()) < 1e-5 * np.abs(first_corr) and last_corr.std() < 1e-5 * np.abs(first_corr)
 
+    @staticmethod
+    def _ensure_array_qn(mpdm):
+        mpdm.qn = [np.asarray(qn) for qn in mpdm.qn]
+        return mpdm
+
     def init_mps_abs(self):
         dipole_mpo = Mpo.onsite(self.model, r"a^\dagger", dipole=True)
         i_mpo = MpDm.max_entangled_gs(self.model)
@@ -140,10 +148,12 @@ class SpectraFiniteT(SpectraTdMpsJobBase):
     def evolve_single_step(self, evolve_dt):
         latest_bra_mpo, latest_ket_mpo = self.latest_mps
         if len(self.evolve_times) % 2 == 1:
+            latest_ket_mpo = self._ensure_array_qn(latest_ket_mpo)
             latest_ket_mpo = \
                 latest_ket_mpo.evolve_exact(self.h_mpo, -evolve_dt, "GS")
             latest_ket_mpo = latest_ket_mpo.evolve(self.h_mpo, evolve_dt)
         else:
+            latest_bra_mpo = self._ensure_array_qn(latest_bra_mpo)
             latest_bra_mpo = \
                 latest_bra_mpo.evolve_exact(self.h_mpo, evolve_dt, "GS")
             latest_bra_mpo = latest_bra_mpo.evolve(self.h_mpo, -evolve_dt)

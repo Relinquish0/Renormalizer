@@ -40,7 +40,7 @@ def test_multiset_spectra_zerot_channel_norms_follow_dipoles_before_normalizatio
     model.dipole = {keys[0]: 1.0, keys[1]: 2.0}
     job = MultisetSpectraZeroT(model=model, max_bonddim=4)
 
-    ket = job._build_absorption_ket()
+    ket = job._init_weighted_ket(job._get_dipole_vector())
     channel_norms = [
         ket.msmps[a].conj().dot(ket.msmps[a]).real
         for a in range(ket.N_electron)

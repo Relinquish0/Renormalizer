@@ -17,15 +17,18 @@ N      = 75    # 格点数（电子数量）
 omega_0 = 1.0  # 声子频率，单位 a.u.  
 J      = 1.0   # 跳跃积分，单位 a.u.  
 g      = 1.5   # 电子-振动耦合强度  
+nu_max = 16    # 与 pyttn 中的 nu_max 保持一致
+phonon_dim = nu_max + 1  # pyttn.boson_mode 使用局域 Hilbert-space dimension
   
 # ── 第一步：构建声子模式 ──────────────────────  
-# 重组能 λ = g² * ω₀（lam=True 时第二个参数为 λ）  
+# 重组能 λ = g² * ω₀；Renormalizer.simple_phonon 的第二个参数是位移 d
 lam = g**2 * omega_0   # = 2.25 a.u.  
+displacement = np.sqrt(2 * lam) / omega_0
   
-ph = Phonon.simplest_phonon(  
+ph = Phonon.simple_phonon(
     Quantity(omega_0),       # ω₀ = 1 a.u.  
-    Quantity(lam),           # λ  = 2.25 a.u.  
-    lam=True                 # 第二参数解释为重组能  
+    Quantity(displacement),  # d gives g = sqrt(λ / ω₀) = 1.5
+    phonon_dim               # local dimension = nu_max + 1 = 17
 )  
   
 # ── 第二步：构建分子（每个格点一个电子 + 一个声子模式）──  
@@ -37,10 +40,10 @@ model = HolsteinModel(
     [mol] * N,         # 75 个相同格点  
     Quantity(J),       # J = 1 a.u.，自动生成三对角跳跃矩阵  
     scheme=2,          # 基组排列方案（e₀, ph₀, e₁, ph₁, …）  
-    periodic=False     # 开放边界条件（若需周期边界改为 True）  
+    periodic=True      # 与 pyttn 的 (site + 1) % nsites 周期边界保持一致
 )  
   
-max_bonddim = 32
+max_bonddim = 8
 evolve_dt = 0.1
 n_snapshots = 500
 dynamics_job = MultisetChargeDiffusionDynamics(

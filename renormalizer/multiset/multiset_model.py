@@ -256,7 +256,7 @@ class MultisetModel:
         self._qr_qn_plan_cache[cache_key] = plan
         return plan
 
-    def _batched_qr_qn(self, coef_batch, qnbigl, qnbigr, qntot, system):
+    def _batched_qr_qn(self, coef_batch, qnbigl, qnbigr, qntot, system, max_rank=None):
         assert system in ["L", "R"]
 
         batch_size = coef_batch.shape[0]
@@ -290,12 +290,16 @@ class MultisetModel:
             qnl_list.extend([nl] * kdim)
             qnr_list.extend([nr.copy() for _ in range(kdim)])
 
-        return (
-            xp.concatenate(u_blocks, axis=-1),
-            qnl_list,
-            xp.concatenate(vt_blocks, axis=1),
-            qnr_list,
-        )
+        u_batch = xp.concatenate(u_blocks, axis=-1)
+        vt_batch = xp.concatenate(vt_blocks, axis=1)
+        if max_rank is not None:
+            max_rank = max(1, int(max_rank))
+            u_batch = u_batch[:, :, :max_rank]
+            vt_batch = vt_batch[:, :max_rank, :]
+            qnl_list = qnl_list[:max_rank]
+            qnr_list = qnr_list[:max_rank]
+
+        return u_batch, qnl_list, vt_batch, qnr_list
 
     def _build_site_batched_data(self, imps, l_tensors, r_tensors):
         batched_groups = []
@@ -423,12 +427,18 @@ class MultisetModel:
                 local_steps.append(j)
 
                 qnbigl, qnbigr, _ = ms_mps.msmps[0]._get_big_qn([imps])
+                max_qr_rank = None
+                if self.compress_config.criteria is not CompressCriteria.threshold:
+                    self.compress_config.set_bonddim(len(ms_mps.msmps[0].bond_dims))
+                    bond_idx = imps + 1 if system == "L" else imps
+                    max_qr_rank = self.compress_config.max_dims[bond_idx]
                 u_batch, qnlset, vt_batch, qnrset = self._batched_qr_qn(
                     mps_t,
                     qnbigl,
                     qnbigr,
                     ms_mps.msmps[0].qntot,
                     system,
+                    max_rank=max_qr_rank,
                 )
 
                 if not ms_mps.msmps[0].to_right and imps != 0:
@@ -576,8 +586,7 @@ class MultisetModel:
             self.MsMps.msmps[alpha] = expanded
             
     def population(self):
-        bras = [self.MsMps.msmps[a].conj() for a in range(self.N_electron)]
-        return [bras[a].dot(self.MsMps.msmps[a]).real for a in range(self.N_electron)]
+        return self.MsMps.e_occupations_multiset
 
     def popultation(self):
         return self.population()
@@ -594,13 +603,7 @@ class MultisetModel:
         return (num / den).real
 
     def rho_el(self):
-        Ne = self.N_electron
-        rho = np.zeros((Ne, Ne), dtype=np.complex128)
-        for a in range(Ne):
-            bra = self.MsMps.msmps[a].conj()
-            for b in range(Ne):
-                rho[a, b] = bra.dot(self.MsMps.msmps[b])
-        return rho
+        return self.MsMps.rho_el()
 
     def decoherence_metrics(self):
         rho = self.rho_el()

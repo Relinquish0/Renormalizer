@@ -58,11 +58,11 @@ def save_zerot_data(filename, time_series, autocorr):
 
 def main():
     # "monomer": 1, "dimer": 2, "hexmer": 6
-    type_ = "hexmer"
+    type_ = "dimer"
 
     model = construct_model(type_)
 
-    max_bonddim = 42
+    max_bonddim = 4
     evolve_config = EvolveConfig(method=MsEvolveMethod.ms_evolve_tdvp_ps, adaptive=False)
     compress_config = CompressConfig(CompressCriteria.both, threshold=1e-8, max_bonddim=max_bonddim)
 
