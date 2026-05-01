@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
 
+import logging
+
 import numpy as np
 
 from renormalizer.model.basis import BasisSHO
@@ -9,6 +11,9 @@ from renormalizer.multiset.multiset_model import MultisetModel
 from renormalizer.multiset.multiset_mps import MsEvolveMethod, MultisetMps
 from renormalizer.multiset.multiset_tdjob import MultisetTdJob, _state_bond_dims
 from renormalizer.utils import CompressConfig, EvolveConfig, EvolveMethod, Quantity
+
+
+logger = logging.getLogger(__name__)
 
 
 def _state_inner_product(bra, ket) -> complex:
@@ -36,6 +41,14 @@ def _multiset_dipole_overlap(bra: MultisetMps, ket: MultisetMps, dipole) -> comp
     return complex(total)
 
 
+def _multiset_cross_overlap(bra: MultisetMps, ket: MultisetMps) -> complex:
+    total = 0j
+    for alpha in range(bra.N_electron):
+        for beta in range(ket.N_electron):
+            total += _state_inner_product(bra.msmps[alpha], ket.msmps[beta])
+    return complex(total)
+
+
 def _scale_multiset_state(state: MultisetMps, factor: float) -> MultisetMps:
     for alpha in range(state.N_electron):
         state.msmps[alpha].scale(float(factor), inplace=True)
@@ -48,7 +61,6 @@ class MultisetSpectraZeroT(MultisetTdJob):
         model=None,
         spectratype: str = "abs",
         max_bonddim=None,
-        ms_model: MultisetModel = None,
         evolve_config: EvolveConfig = None,
         compress_config: CompressConfig = None,
         offset: Quantity = Quantity(0),
@@ -67,46 +79,21 @@ class MultisetSpectraZeroT(MultisetTdJob):
         self._autocorr = []
         self._bond_dims = []
 
-        if ms_model is None:
-            if model is None or max_bonddim is None:
-                raise ValueError("Either provide `ms_model` or both `model` and `max_bonddim`.")
-            self.ms_model = MultisetModel(
-                model,
-                max_bonddim=max_bonddim,
-                temperature=Quantity(0, "K"),
-                evolve_config=evolve_config,
-                compress_config=compress_config,
-                auto_init=False,
-            )
-        else:
-            if ms_model.temperature != Quantity(0, "K"):
-                raise ValueError("`MultisetSpectraZeroT` only supports zero-temperature `ms_model`.")
-            if spectratype == "emi":
-                if ms_model.MsMps is None:
-                    raise ValueError("`ms_model` should already contain an excited multiset state for emission.")
-                if evolve_config is not None:
-                    ms_model.evolve_config = evolve_config
-                if compress_config is not None:
-                    ms_model.compress_config = compress_config
-                self.ms_model = ms_model
-            else:
-                self.ms_model = MultisetModel(
-                    ms_model.model,
-                    max_bonddim=None,
-                    temperature=Quantity(0, "K"),
-                    method=ms_model.method,
-                    evolve_config=ms_model.evolve_config if evolve_config is None else evolve_config,
-                    compress_config=ms_model.compress_config if compress_config is None else compress_config,
-                    auto_init=False,
-                )
+        if model is None or max_bonddim is None:
+            raise ValueError("Both `model` and `max_bonddim` are required.")
+        self.ms_model = MultisetModel(
+            model,
+            max_bonddim=max_bonddim,
+            temperature=Quantity(0, "K"),
+            evolve_config=evolve_config,
+            compress_config=compress_config,
+            auto_init=False,
+        )
 
         self.model = self.ms_model.model
         self.h_mpo = Mpo(self.ms_model.init_model, offset=self.offset)
-        if spectratype == "emi":
-            if evolve_config is None or isinstance(self.ms_model.evolve_config.method, MsEvolveMethod):
-                evolve_config = EvolveConfig(method=EvolveMethod.tdvp_ps, adaptive=False)
         super().__init__(
-            evolve_config=self.ms_model.evolve_config if spectratype == "abs" else evolve_config,
+            evolve_config=self.ms_model.evolve_config,
             dump_mps=dump_mps,
             dump_dir=dump_dir,
             job_name=job_name,
@@ -118,30 +105,15 @@ class MultisetSpectraZeroT(MultisetTdJob):
         return self.init_mps_abs()
 
     def init_mps_abs(self):
-        ket = self._init_weighted_ket(self._get_dipole_vector())
+        ket = self._init_dipole()
         if self.expand:
-            ket = self._expand_initial_ket(ket)
+            ket = self._expand_ket_bonddim(ket)
         return ket.copy(), ket
 
     def init_mps_emi(self):
-        if self.ms_model.MsMps is None:
-            ket = self._init_weighted_ket(np.ones(self.model.n_edofs))
-        else:
-            ket = self.ms_model.MsMps.copy()
-            for alpha in range(ket.N_electron):
-                ket.msmps[alpha].compress_config = self.ms_model.compress_config
-
-        dipole = self._get_dipole_vector()
-        components = []
-        for alpha in range(ket.N_electron):
-            state = ket.msmps[alpha].copy()
-            state.scale(float(dipole[alpha]), inplace=True)
-            state.compress_config = self.ms_model.compress_config
-            components.append(state)
-
-        ket = _sum(components, compress=False)
-        ket.compress_config = self.ms_model.compress_config
-        ket.evolve_config = self.evolve_config
+        ket = self._init_dipole()
+        if self.expand:
+            ket = self._expand_ket_bonddim(ket)
         return ket.copy(), ket
 
     def evolve_single_step(self, evolve_dt):
@@ -155,7 +127,10 @@ class MultisetSpectraZeroT(MultisetTdJob):
     def process_mps(self, mps):
         bra, ket = mps
         if isinstance(bra, MultisetMps):
-            self._autocorr.append(_multiset_overlap(bra, ket))
+            if self.spectratype == "emi":
+                self._autocorr.append(_multiset_cross_overlap(bra, ket))
+            else:
+                self._autocorr.append(_multiset_overlap(bra, ket))
         else:
             self._autocorr.append(complex(bra.conj().dot(ket)))
         self._bond_dims.append(_state_bond_dims(mps))
@@ -172,6 +147,7 @@ class MultisetSpectraZeroT(MultisetTdJob):
         return {
             "temperature": self.temperature.as_au(),
             "time series": self.evolve_times,
+            "time_series": self.evolve_times,
             "autocorr": self.autocorr,
             "bond_dims": self.bond_dims,
         }
@@ -181,7 +157,7 @@ class MultisetSpectraZeroT(MultisetTdJob):
         init_mp.compress_config = self.ms_model.compress_config
         return init_mp
 
-    def _get_dipole_vector(self) -> np.ndarray:
+    def _get_dipole(self) -> np.ndarray:
         dipole = getattr(self.model, "dipole", None)
         if dipole is None:
             raise ValueError("`model.dipole` is required for MultisetSpectraZeroT.")
@@ -207,17 +183,18 @@ class MultisetSpectraZeroT(MultisetTdJob):
             )
         return dipole
 
-    def _init_weighted_ket(self, weights) -> MultisetMps:
-        phi_g = self.init_mp()
-        weights = np.asarray(weights, dtype=float)
+    def _init_dipole(self):
+        dipole_weights = self._get_dipole()
+        phi_g = self.init_mp() # HF state
+        dipole_weights = np.asarray(dipole_weights, dtype=float)
         msmps = []
         for alpha in range(self.ms_model.N_electron):
             state = phi_g.copy()
-            state.scale(float(weights[alpha]), inplace=True)
+            state.scale(float(dipole_weights[alpha]), inplace=True)
             state.compress_config = self.ms_model.compress_config
             msmps.append(state)
 
-        return MultisetMps(
+        ket = MultisetMps(
             self.ms_model.MsModel,
             self.ms_model.N_electron,
             temperature=Quantity(0, "K"),
@@ -226,7 +203,9 @@ class MultisetSpectraZeroT(MultisetTdJob):
             msmps=msmps,
         )
 
-    def _expand_initial_ket(self, ket: MultisetMps, coef: float = 1e-10, use_hint: bool = True) -> MultisetMps:
+        return ket
+
+    def _expand_ket_bonddim(self, ket: MultisetMps, coef: float = 1e-10, use_hint: bool = True) -> MultisetMps:
         initial_norm = _multiset_overlap(ket, ket).real
 
         self.ms_model.set_mps(ket)
@@ -252,7 +231,6 @@ class MultisetSpectraFiniteT(MultisetTdJob):
         insteps: int = 1,
         thermal_init_method: str = "imaginary_time_exact",
         max_bonddim=None,
-        ms_model: MultisetModel = None,
         evolve_config: EvolveConfig = None,
         compress_config: CompressConfig = None,
         ievolve_config: EvolveConfig = None,
@@ -266,34 +244,29 @@ class MultisetSpectraFiniteT(MultisetTdJob):
             raise ValueError(f"Unsupported spectratype: {spectratype}")
         if temperature == 0:
             raise ValueError("`MultisetSpectraFiniteT` requires a non-zero temperature.")
+        if thermal_init_method not in ["imaginary_time_exact", "imaginary_time_propagate"]:
+            raise ValueError(f"Unsupported thermal_init_method: {thermal_init_method}")
 
         self.spectratype = spectratype
         self.temperature = temperature
         self.insteps = insteps
-        self.thermal_init_method = thermal_init_method
+        self.thermal_init_method = thermal_init_method # "imaginary_time_exact" or "imaginary_time_propagate"
         self.offset = offset
         self.expand = expand
         self._autocorr = []
         self._bond_dims = []
 
-        if ms_model is None:
-            if model is None or max_bonddim is None:
-                raise ValueError("Either provide `ms_model` or both `model` and `max_bonddim`.")
-            self.ms_model = MultisetModel(
-                model,
-                max_bonddim=max_bonddim,
-                temperature=temperature,
-                method=self._normalize_thermal_init_method(),
-                evolve_config=evolve_config,
-                compress_config=compress_config,
-                auto_init=False,
-            )
-        else:
-            if evolve_config is not None:
-                ms_model.evolve_config = evolve_config
-            if compress_config is not None:
-                ms_model.compress_config = compress_config
-            self.ms_model = ms_model
+        if model is None or max_bonddim is None:
+            raise ValueError("Both `model` and `max_bonddim` are required.")
+        self.ms_model = MultisetModel(
+            model,
+            max_bonddim=max_bonddim,
+            temperature=temperature,
+            method=self.thermal_init_method,
+            evolve_config=evolve_config,
+            compress_config=compress_config,
+            auto_init=False,
+        )
 
         self.model = self.ms_model.model
         self.h_mpo = Mpo(self.ms_model.init_model, offset=self.offset)
@@ -305,31 +278,23 @@ class MultisetSpectraFiniteT(MultisetTdJob):
             if ievolve_config is None else ievolve_config
         )
 
+        job_evolve_config = self.ms_model.evolve_config if spectratype == "abs" else self.local_evolve_config
         super().__init__(
-            evolve_config=self.ms_model.evolve_config,
+            evolve_config=job_evolve_config,
             dump_mps=dump_mps,
             dump_dir=dump_dir,
             job_name=job_name,
         )
 
-    def _normalize_thermal_init_method(self):
-        method = self.thermal_init_method.lower().replace("-", "_").replace(" ", "_")
-        if method in ["exact", "imaginary_time_exact"]:
-            return "imaginary_time_exact"
-        if method in ["propagate", "imaginary_time", "imaginary_time_propagate"]:
-            return "imaginary_time_propagate"
-        if method in ["thermofield", "thermo_field"]:
-            raise ValueError("Thermo-field dynamics is not supported for multiset spectra.")
-        raise ValueError(f"Unsupported thermal_init_method: {self.thermal_init_method}")
-
     def init_mps(self):
         if self.spectratype == "emi":
             return self.init_mps_emi()
-        return self.init_mps_abs()
+        elif self.spectratype == "abs":
+            return self.init_mps_abs()
 
     def init_mps_abs(self):
-        thermal_mpdm = self.init_mp()
-        ket = self._broadcast_local_state(thermal_mpdm, self._get_dipole_vector())
+        thermal_mpdm = self._init_ground_thermal_state()
+        ket = self._init_dipole(thermal_mpdm)
         if self.expand:
             ket = self._expand_initial_multiset_state(ket)
         self._set_multiset_hamiltonian_offset(self.offset)
@@ -337,32 +302,30 @@ class MultisetSpectraFiniteT(MultisetTdJob):
 
     def init_mps_emi(self):
         thermal_state = self._init_excited_thermal_state()
+        ket = self._init_dipole(thermal_state)
         if self.expand:
-            thermal_state = self._expand_initial_multiset_state(thermal_state)
-        self._set_multiset_hamiltonian_offset(self.offset)
-        return thermal_state.copy(), thermal_state
+            ket = self._expand_initial_multiset_state(ket)
+        self.ms_model.set_mps(ket)
+        excited_energy = Quantity(self.ms_model.Hamiltonian())
+        logger.info(
+            "Finite-temperature multiset emission subtracts excited-state carrier energy %s au (%s eV)",
+            excited_energy.as_au(),
+            excited_energy.as_au() / Quantity(1, "eV").as_au(),
+        )
+        self._set_multiset_hamiltonian_offset(excited_energy + self.offset)
+        return ket.copy(), ket
 
-    def init_mp(self, method=None):
-        method = self._normalize_thermal_init_method() if method is None else method
-        if method == "imaginary_time_exact":
-            return self._exact_local_thermal_mpdm(self.ms_model.init_model)
-        if method == "imaginary_time_propagate":
-            local_state = MpDm.max_entangled_gs(self.ms_model.init_model)
-            local_state.compress_config = self.icompress_config
-            tp = ThermalProp(
-                local_state,
-                h_mpo_model=self.ms_model.init_model,
-                evolve_config=EvolveConfig(method=EvolveMethod.tdvp_ps, adaptive=False),
-                auto_expand=False,
-            )
-            tp.evolve(None, self.insteps, self.temperature.to_beta() / 2j)
-            thermal_state = tp.latest_mps
-            thermal_state.compress_config = self.icompress_config
-            thermal_state.evolve_config = self.evolve_config
-            return thermal_state
-        raise ValueError(f"Unsupported thermal initialisation method: {method}")
+    def _init_ground_thermal_state(self):
+        if self.thermal_init_method == "imaginary_time_exact":
+            return self._exact_ground_thermal_mpdm(self.ms_model.init_model)
+        elif self.thermal_init_method == "imaginary_time_propagate":
+            return self._propagate_ground_thermal_mpdm(self.ms_model.init_model)
 
-    def _exact_local_thermal_mpdm(self, model):
+    def _exact_ground_thermal_mpdm(self, model):
+        '''
+        Build the ground state in finite temperature
+        Only phonon terms are purification
+        '''
         beta = self.temperature.to_beta()
         condition = {}
         for basis in model.basis:
@@ -378,37 +341,32 @@ class MultisetSpectraFiniteT(MultisetTdJob):
         thermal_mpdm.evolve_config = self.evolve_config
         return thermal_mpdm
 
-    def _init_excited_thermal_state(self):
-        method = self._normalize_thermal_init_method()
-        if method == "imaginary_time_exact":
-            msmps = [
-                self._exact_local_thermal_mpdm(self.ms_model.MsModel[alpha][alpha])
-                for alpha in range(self.ms_model.N_electron)
-            ]
-            return self._build_multiset_state(msmps)
-
-        msmps = []
-        for alpha in range(self.ms_model.N_electron):
-            state = MpDm.max_entangled_gs(self.ms_model.MsModel[alpha][alpha])
-            state.compress_config = self.icompress_config
-            state.evolve_config = self.evolve_config
-            msmps.append(state)
-        return self._imaginary_time_propagate_multiset(self._build_multiset_state(msmps))
-
-    def _build_multiset_state(self, msmps):
-        for state in msmps:
-            state.compress_config = self.icompress_config
-            state.evolve_config = self.evolve_config
-        return MultisetMps(
-            self.ms_model.MsModel,
-            self.ms_model.N_electron,
-            temperature=self.temperature,
-            init_model=self.ms_model.init_model,
-            method=self._normalize_thermal_init_method(),
-            msmps=msmps,
+    def _propagate_ground_thermal_mpdm(self, model):
+        '''
+        Build the ground matrix product density matrix in finite temperature
+        by using singleset imagine time evolution
+        Because in absorption spectra, only ground state are purification.
+        There is no electron-phonon coupling in the system-bath
+        '''
+        local_state = self._max_entangled_ground_mpdm(model, set_evolve_config=False)
+        tp = ThermalProp(
+            local_state,
+            h_mpo_model=model,
+            evolve_config=EvolveConfig(method=EvolveMethod.tdvp_ps, adaptive=False),
+            auto_expand=False,
         )
-
-    def _imaginary_time_propagate_multiset(self, state: MultisetMps):
+        tp.evolve(None, self.insteps, self.temperature.to_beta() / 2j)
+        thermal_state = tp.latest_mps
+        thermal_state.compress_config = self.icompress_config
+        thermal_state.evolve_config = self.evolve_config
+        return thermal_state
+    
+    def _propagate_excited_thermal_msmpdm(self, state: MultisetMps):
+        '''
+        Build the excited multiset matrix product density matrix in finite temperature
+        by using multiset imagine time evolution
+        Because in emission spectra, electron-phonon coupling is considered
+        '''
         if self.insteps is None:
             raise ValueError("`insteps` must be defined for imaginary-time propagation.")
         evolve_dt = self.temperature.to_beta() / (2j * self.insteps)
@@ -420,6 +378,46 @@ class MultisetSpectraFiniteT(MultisetTdJob):
             return state
         finally:
             self.ms_model.evolve_config = original_evolve_config
+
+    def _max_entangled_ground_mpdm(self, model, set_evolve_config=True):
+        state = MpDm.max_entangled_gs(model)
+        state.compress_config = self.icompress_config
+        if set_evolve_config:
+            state.evolve_config = self.evolve_config
+        return state
+
+    def _init_excited_thermal_state(self):
+        method = self.thermal_init_method
+        if method == "imaginary_time_exact":
+            logger.warning(
+                "Finite-temperature multiset emission does not support a physically exact "
+                "diagonal-block thermal initialisation. Falling back to "
+                "`imaginary_time_propagate` for the excited thermal state."
+            )
+            msmps = [
+                self._max_entangled_ground_mpdm(self.ms_model.MsModel[alpha][alpha])
+                for alpha in range(self.ms_model.N_electron)
+            ]
+            return self._propagate_excited_thermal_msmpdm(self._build_multiset_state(msmps))
+        elif self.thermal_init_method == "imaginary_time_propagate":
+            msmps = [
+                self._max_entangled_ground_mpdm(self.ms_model.MsModel[alpha][alpha])
+                for alpha in range(self.ms_model.N_electron)
+            ]
+            return self._propagate_excited_thermal_msmpdm(self._build_multiset_state(msmps))
+
+    def _build_multiset_state(self, msmps):
+        for state in msmps:
+            state.compress_config = self.icompress_config
+            state.evolve_config = self.evolve_config
+        return MultisetMps(
+            self.ms_model.MsModel,
+            self.ms_model.N_electron,
+            temperature=self.temperature,
+            init_model=self.ms_model.init_model,
+            method=self.thermal_init_method,
+            msmps=msmps,
+        )
 
     def _broadcast_local_state(self, local_state, weights=None):
         if weights is None:
@@ -433,24 +431,21 @@ class MultisetSpectraFiniteT(MultisetTdJob):
             state.evolve_config = self.evolve_config
             msmps.append(state)
 
-        return MultisetMps(
-            self.ms_model.MsModel,
-            self.ms_model.N_electron,
-            temperature=self.temperature,
-            init_model=self.ms_model.init_model,
-            method=self._normalize_thermal_init_method(),
-            msmps=msmps,
-        )
+        return self._build_multiset_state(msmps)
 
-    def _collapse_with_dipole(self, state: MultisetMps):
-        dipole = self._get_dipole_vector()
-        components = []
+    def _init_dipole(self, state):
+        dipole = self._get_dipole()
+        if not isinstance(state, MultisetMps):
+            return self._broadcast_local_state(state, dipole)
+
+        msmps = []
         for alpha in range(state.N_electron):
             component = state.msmps[alpha].copy()
             component.scale(float(dipole[alpha]), inplace=True)
             component.compress_config = self.icompress_config
-            components.append(component)
-        return _sum(components, compress=False)
+            component.evolve_config = self.evolve_config
+            msmps.append(component)
+        return self._build_multiset_state(msmps)
 
     def _expand_initial_multiset_state(self, state: MultisetMps, coef: float = 1e-10) -> MultisetMps:
         self.ms_model.set_mps(state)
@@ -548,7 +543,7 @@ class MultisetSpectraFiniteT(MultisetTdJob):
         bra, ket = mps
         if isinstance(bra, MultisetMps):
             if self.spectratype == "emi":
-                ft = _multiset_dipole_overlap(bra, ket, self._get_dipole_vector())
+                ft = _multiset_cross_overlap(bra, ket)
             else:
                 ft = _multiset_overlap(bra, ket)
         else:
@@ -573,11 +568,12 @@ class MultisetSpectraFiniteT(MultisetTdJob):
         return {
             "temperature": self.temperature.as_au(),
             "time series": self.evolve_times,
+            "time_series": self.evolve_times,
             "autocorr": self.autocorr,
             "bond_dims": self.bond_dims,
         }
 
-    def _get_dipole_vector(self) -> np.ndarray:
+    def _get_dipole(self) -> np.ndarray:
         dipole = getattr(self.model, "dipole", None)
         if dipole is None:
             raise ValueError("`model.dipole` is required for MultisetSpectraFiniteT.")

@@ -2,8 +2,7 @@ import numpy as np
 import pytest
 
 from renormalizer.model import HolsteinModel, Mol, Phonon
-from renormalizer.multiset import MultisetSpectraZeroT as ExportedMultisetSpectraZeroT
-from renormalizer.multiset.multiset_model import MultisetModel
+from renormalizer.multiset import MsEvolveMethod, MultisetMps, MultisetSpectraZeroT as ExportedMultisetSpectraZeroT
 from renormalizer.multiset.multisetspectra import MultisetSpectraZeroT
 from renormalizer.utils import Quantity
 
@@ -34,13 +33,28 @@ def test_multiset_spectra_zerot_bootstrap_autocorr():
     assert np.isfinite(job.autocorr[0].real)
 
 
-def test_multiset_spectra_zerot_channel_norms_follow_dipoles_before_normalization():
+def test_multiset_spectra_zerot_emi_stays_in_multiset_container():
+    job = MultisetSpectraZeroT(
+        model=_build_small_model(),
+        spectratype="emi",
+        max_bonddim=4,
+    )
+    bra, ket = job.latest_mps
+
+    assert isinstance(bra, MultisetMps)
+    assert isinstance(ket, MultisetMps)
+    assert job.evolve_config.method is MsEvolveMethod.ms_evolve_tdvp_ps
+    assert np.isclose(job.autocorr[0].real, 4.0)
+
+
+@pytest.mark.parametrize("spectratype", ["abs", "emi"])
+def test_multiset_spectra_zerot_channel_norms_follow_dipoles_before_normalization(spectratype):
     model = _build_small_model()
     keys = list(model.dipole)
     model.dipole = {keys[0]: 1.0, keys[1]: 2.0}
-    job = MultisetSpectraZeroT(model=model, max_bonddim=4)
+    job = MultisetSpectraZeroT(model=model, spectratype=spectratype, max_bonddim=4)
 
-    ket = job._init_weighted_ket(job._get_dipole_vector())
+    ket = job._init_dipole()
     channel_norms = [
         ket.msmps[a].conj().dot(ket.msmps[a]).real
         for a in range(ket.N_electron)
@@ -87,27 +101,6 @@ def test_multiset_spectra_zerot_dipole_changes_t0_autocorr():
     assert np.isclose(job2.autocorr[0].real, 4.0 * job1.autocorr[0].real)
 
 
-def test_multiset_spectra_zerot_rejects_finite_temperature_ms_model():
-    ms_model = MultisetModel(
-        _build_small_model(),
-        max_bonddim=4,
-        temperature=Quantity(300, "K"),
-        auto_init=False,
-    )
-
-    with pytest.raises(ValueError, match="zero-temperature"):
-        MultisetSpectraZeroT(ms_model=ms_model)
-
-
-def test_multiset_spectra_zerot_ms_model_path_matches_model_path():
-    model = _build_small_model()
-    job_from_model = MultisetSpectraZeroT(model=model, max_bonddim=4)
-    ms_model = MultisetModel(model, max_bonddim=4)
-    job_from_ms_model = MultisetSpectraZeroT(ms_model=ms_model)
-
-    assert np.allclose(job_from_model.autocorr[0], job_from_ms_model.autocorr[0])
-
-    job_from_model.evolve(evolve_dt=0.05, nsteps=1)
-    job_from_ms_model.evolve(evolve_dt=0.05, nsteps=1)
-
-    assert np.allclose(job_from_model.autocorr[-1], job_from_ms_model.autocorr[-1])
+def test_multiset_spectra_zerot_requires_model_and_max_bonddim():
+    with pytest.raises(ValueError, match="model.*max_bonddim"):
+        MultisetSpectraZeroT(model=_build_small_model())

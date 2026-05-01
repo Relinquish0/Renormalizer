@@ -61,21 +61,13 @@ def save_zerot_data(filename):
 
 # "monomer": 1, "dimer": 2, "hexmer": 6
 type_ = "dimer"
+spectratype = "emi"
 
 model = construct_model(type_)
 
 optimize_config = OptimizeConfig()  
 evolve_config = EvolveConfig(EvolveMethod.tdvp_ps, adaptive=False)  
 compress_config = CompressConfig(CompressCriteria.fixed, max_bonddim=120)  
-  
-"""
-insteps = 50
-offset = Quantity(2.13 - 0.086, "eV") + Quantity(model.gs_zpe)
-"""
-
-spectratype = "abs"
-
-offset = Quantity(2.13, "eV") + Quantity(model.gs_zpe)
 
 spectra = SpectraFiniteT(  
     model=model,  # 使用您已有的model  
@@ -83,7 +75,7 @@ spectra = SpectraFiniteT(
     temperature=Quantity(298,"K"),
     evolve_config=evolve_config,  
     insteps = 50,
-    offset = offset,
+    offset = Quantity(0),
     compress_config = compress_config,
     icompress_config = compress_config,
 )  

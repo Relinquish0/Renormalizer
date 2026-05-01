@@ -1,12 +1,12 @@
 #!/bin/bash
-#SBATCH --job-name=Holstein75_16bd
+#SBATCH --job-name=Holstein75_64bd_subspace
 #SBATCH --nodes=1
 #SBATCH --ntasks=1        # Nodes * GPUs-per-node * Ranks-per-GPU
 #SBATCH --gpus-per-node=1   # Specify the GPUs-per-node
 #SBATCH -p 4A100,4V100
 #SBATCH --qos=normal          # Depending on your needs
-#SBATCH --output=Holstein75_16bd.log
-#SBATCH --error=Holstein75_16bd.log
+#SBATCH --output=Holstein75_64bd.log
+#SBATCH --error=Holstein75_64bd.log
 
 source $HOME/.bashrc
 source /software/envs/anaconda3.env

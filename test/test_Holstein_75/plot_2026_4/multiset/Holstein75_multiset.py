@@ -5,9 +5,13 @@ from renormalizer.model import Phonon, Mol, HolsteinModel
 from renormalizer.utils import Quantity, EvolveConfig, CompressConfig, CompressCriteria, EvolveMethod, log
 from renormalizer.utils.constant import cm2au
 from renormalizer.transport import ChargeDiffusionDynamics, InitElectron
+from renormalizer.multiset import MultisetChargeDiffusionDynamics
 
 import numpy as np
-  
+import pandas as pd
+from renormalizer.utils.log import package_logger as logger
+from datetime import datetime
+
 # ── 参数设定 ──────────────────────────────────  
 N      = 75    # 格点数（电子数量）  
 omega_0 = 1.0  # 声子频率，单位 a.u.  
@@ -39,13 +43,24 @@ model = HolsteinModel(
     periodic=True      # 与 pyttn 的 (site + 1) % nsites 周期边界保持一致
 )  
   
+max_bonddim = 8
 evolve_dt = 0.1
-evolve_config = EvolveConfig(EvolveMethod.tdvp_ps, guess_dt=evolve_dt)
-evolve_config.if_startup_substeps = True
-evolve_config.startup_substeps_n = 10
-compress_config = CompressConfig(CompressCriteria.fixed, max_bonddim=64)
-ct = ChargeDiffusionDynamics(model, evolve_config=evolve_config, compress_config=compress_config, init_electron=InitElectron.fc)
-ct.dump_dir = "./"
-ct.job_name = 'Holstein75_64bd_subspace'
-ct.stop_at_edge = False
-ct.evolve(evolve_dt=evolve_dt, evolve_time=50)
+n_snapshots = 500
+dynamics_job = MultisetChargeDiffusionDynamics(
+    model=model,
+    max_bonddim=max_bonddim,
+    stop_at_edge=False,
+)
+
+from renormalizer.mps.backend import USE_GPU, xp  
+
+logger.info(f"GPU enabled: {USE_GPU}")  
+logger.info(f"Backend: {'CuPy' if USE_GPU else 'NumPy'}")
+logger.info("maximum bond dimension:%d, evolve time step:%d", max_bonddim, evolve_dt)
+logger.info("number of stored snapshots:%d", n_snapshots)
+
+logger.info("0th population: %s", dynamics_job.e_occupations_array[0])
+dynamics_job.evolve(evolve_dt=evolve_dt, nsteps=n_snapshots - 1)
+populations = np.array(dynamics_job.e_occupations_array)
+pd.DataFrame(populations).to_excel(datetime.now().strftime("%Y-%m-%d-%H%M_FMO") + str(max_bonddim) +'bd_' + str(evolve_dt) + "t.xlsx",
+                            index=False, header=False)    

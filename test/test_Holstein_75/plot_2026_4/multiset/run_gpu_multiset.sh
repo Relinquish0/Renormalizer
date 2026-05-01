@@ -1,12 +1,12 @@
 #!/bin/bash
-#SBATCH --job-name=hexmer_ft_emi
+#SBATCH --job-name=Holstein75_8bd
 #SBATCH --nodes=1
 #SBATCH --ntasks=1        # Nodes * GPUs-per-node * Ranks-per-GPU
 #SBATCH --gpus-per-node=1   # Specify the GPUs-per-node
 #SBATCH -p 4A100,4V100
 #SBATCH --qos=normal          # Depending on your needs
-#SBATCH --output=hexmer_ft_emi.log
-#SBATCH --error=hexmer_ft_emi.log
+#SBATCH --output=Holstein75_8bd.log
+#SBATCH --error=Holstein75_8bd.log
 
 source $HOME/.bashrc
 source /software/envs/anaconda3.env
@@ -28,7 +28,7 @@ echo "==============================="
 
 # 运行主要的Python任务
 echo "Starting"
-python PBI.py \
+python Holstein75_multiset.py \
 echo "Job completed with exit code: $?"
 
 echo "Ending"

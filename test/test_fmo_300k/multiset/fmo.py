@@ -58,7 +58,7 @@ if __name__ == "__main__":
     mol_arangement = np.array([7, 5, 3, 1, 2, 4, 6]) - 1
     model = HolsteinModel(list(np.array(mlist)[mol_arangement]), j_matrix_au[mol_arangement][:, mol_arangement], )
 
-    max_bonddim = 64
+    max_bonddim = 16
     evolve_dt = 160
     n_snapshots = 250
     dynamics_job = MultisetChargeDiffusionDynamics(

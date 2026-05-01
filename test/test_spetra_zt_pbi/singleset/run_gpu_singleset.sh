@@ -1,12 +1,12 @@
 #!/bin/bash
-#SBATCH --job-name=hexmer_chi6
+#SBATCH --job-name=dimer_emi_ss
 #SBATCH --nodes=1
 #SBATCH --ntasks=1        # Nodes * GPUs-per-node * Ranks-per-GPU
 #SBATCH --gpus-per-node=1   # Specify the GPUs-per-node
 #SBATCH -p 4A100,4V100
 #SBATCH --qos=normal          # Depending on your needs
-#SBATCH --output=hexmer_chi6.log
-#SBATCH --error=hexmer_chi6.log
+#SBATCH --output=dimer_emi_ss.log
+#SBATCH --error=dimer_emi_ss.log
 
 source $HOME/.bashrc
 source /software/envs/anaconda3.env

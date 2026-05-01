@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import numpy as np
 
 from renormalizer.model import HolsteinModel, Mol, Phonon
@@ -44,21 +46,16 @@ def construct_model(nmols) -> HolsteinModel:
     return HolsteinModel([Mol(elocalex, ph_list, dipole_abs)] * nmols, Quantity(-500, "cm-1"))
 
 
-def save_finitet_data(filename, time_series, autocorr):
-    np.savez(
-        filename,
-        time_series=time_series,
-        autocorr=autocorr,
-    )
-
-
 def main():
     type_ = "dimer"
     spectratype = "emi"
+    spectra_tag = "ft"
+    dump_dir = Path(__file__).resolve().parent
+    job_name = f"pbi_{type_}_{spectra_tag}_{spectratype}_multiset"
 
     model = construct_model(type_)
 
-    max_bonddim = 42
+    max_bonddim = 32
     evolve_config = EvolveConfig(method=MsEvolveMethod.ms_evolve_tdvp_ps, adaptive=False)
     compress_config = CompressConfig(
         CompressCriteria.both, threshold=1e-8, max_bonddim=max_bonddim
@@ -71,18 +68,15 @@ def main():
         max_bonddim=max_bonddim,
         thermal_init_method="imaginary_time_exact",
         insteps=50,
-        offset=Quantity(2.13, "eV") + Quantity(model.gs_zpe),
+        offset=Quantity(0),
         evolve_config=evolve_config,
         compress_config=compress_config,
+        expand=True,
+        dump_dir=dump_dir,
+        job_name=job_name,
     )
 
     spectra.evolve(evolve_dt=20, nsteps=5000)
-
-    save_finitet_data(
-        filename=f"pbi_{type_}_ft_{spectratype}_multiset.npz",
-        time_series=spectra.evolve_times_array,
-        autocorr=spectra.autocorr,
-    )
 
 
 if __name__ == "__main__":

@@ -39,6 +39,8 @@ class TdMpsJob(object):
         self._dump_mps = None
         self.dump_dir = dump_dir
         self.job_name = job_name
+        self.if_startup_substeps = getattr(self.evolve_config, "if_startup_substeps", False)
+        self.startup_substeps_n = getattr(self.evolve_config, "startup_substeps_n", 10)
         mps = self.init_mps()
         logger.info(f"Initial MPS: {str(mps)}")
         if mps is None:
@@ -64,6 +66,24 @@ class TdMpsJob(object):
              The evolved new mps of the time step.
         """
         raise NotImplementedError
+
+    def _run_startup_substeps(self, evolve_dt):
+        abs_dt = abs(evolve_dt)
+        if abs_dt == 0:
+            raise ValueError("startup substeps require a non-zero evolve_dt")
+
+        phase = evolve_dt / abs_dt
+        previous_abs_time = 0.0
+        substeps = np.logspace(np.log10(abs_dt * 1e-5), np.log10(abs_dt), self.startup_substeps_n)
+        new_mps = self.latest_mps
+
+        for current_abs_time in substeps:
+            sub_dt = phase * float(current_abs_time - previous_abs_time)
+            new_mps = self.evolve_single_step(sub_dt)
+            self.latest_mps = new_mps
+            previous_abs_time = float(current_abs_time)
+
+        return new_mps
     
     def evolve(self, evolve_dt=None, nsteps=None, evolve_time=None):
         '''
@@ -110,6 +130,60 @@ class TdMpsJob(object):
             target_time = "?"
 
         wall_times = [datetime.now()]
+
+        if (
+            self.if_startup_substeps
+            and nsteps > 0
+            and len(self.evolve_times) == 1
+            and np.isclose(self.latest_evolve_time, 0)
+        ):
+            logger.info(
+                "step %s/%s, at time %s/%s begin with %s startup substeps.",
+                len(self.evolve_times),
+                target_steps,
+                self.latest_evolve_time,
+                target_time,
+                self.startup_substeps_n,
+            )
+
+            new_mps = self._run_startup_substeps(evolve_dt)
+
+            self.evolve_times.append(self.latest_evolve_time + evolve_dt)
+            self.process_mps(new_mps)
+            self.latest_mps = new_mps
+
+            evolution_wall_time = datetime.now()
+            time_cost = evolution_wall_time - wall_times[-1]
+            wall_times.append(evolution_wall_time)
+
+            if self.info_interval is not None:
+                mps_abstract = str(new_mps)
+                self._dump_mps = self.dump_mps
+            else:
+                mps_abstract = ""
+                self._dump_mps = None
+
+            logger.info(f"step {len(self.evolve_times)-1} complete, time cost {time_cost}. {mps_abstract}")
+
+            if self._defined_output_path:
+                try:
+                    self.dump_dict()
+                except IOError:  # never quit calculation because of IOError
+                    logger.exception("dumping dict failed with IOError")
+                dump_wall_time = datetime.now()
+                logger.info(f"Dumping time cost {dump_wall_time - evolution_wall_time}")
+
+            if self.stop_evolve_criteria():
+                logger.info(
+                    "Criteria to stop the evolution has met. Stop the evolution"
+                )
+                logger.info(f"{len(wall_times)-1} steps of evolution complete!")
+                logger.info(
+                    "Normal termination. Time cost: %s" % (wall_times[-1] - wall_times[0])
+                )
+                return self
+
+            nsteps -= 1
 
         for i in range(nsteps):
 

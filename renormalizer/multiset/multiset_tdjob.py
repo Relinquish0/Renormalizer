@@ -71,6 +71,8 @@ class MultisetTdJob(object):
         dump_mps: str = None,
         dump_dir: str = None,
         job_name: str = None,
+        if_startup_substeps: bool = False,
+        startup_substeps_n: int = 10,
     ):
         logger.info(
             "Creating multiset TD job. dump_dir: %s. job_name: %s",
@@ -94,6 +96,8 @@ class MultisetTdJob(object):
         self._dump_mps = None
         self.dump_dir = dump_dir
         self.job_name = job_name
+        self.if_startup_substeps = if_startup_substeps
+        self.startup_substeps_n = startup_substeps_n
 
         mps = self.init_mps()
         logger.info(f"Initial multiset state: {str(mps)}")
@@ -120,6 +124,24 @@ class MultisetTdJob(object):
 
     def stop_evolve_criteria(self):
         return False
+
+    def _run_startup_substeps(self, evolve_dt):
+        abs_dt = abs(evolve_dt)
+        if abs_dt == 0:
+            raise ValueError("startup substeps require a non-zero evolve_dt")
+
+        phase = evolve_dt / abs_dt
+        previous_abs_time = 0.0
+        substeps = np.logspace(np.log10(abs_dt * 1e-5), np.log10(abs_dt), self.startup_substeps_n)
+        new_mps = self.latest_mps
+
+        for current_abs_time in substeps:
+            sub_dt = phase * float(current_abs_time - previous_abs_time)
+            new_mps = self.evolve_single_step(sub_dt)
+            self.latest_mps = new_mps
+            previous_abs_time = float(current_abs_time)
+
+        return new_mps
 
     def _checkpoint_state_path(self):
         if not self._defined_output_path:
@@ -208,6 +230,63 @@ class MultisetTdJob(object):
 
         wall_times = [datetime.now()]
 
+        if (
+            self.if_startup_substeps
+            and nsteps > 0
+            and len(self.evolve_times) == 1
+            and np.isclose(self.latest_evolve_time, 0)
+        ):
+            logger.info(
+                "step %s/%s, at time %s/%s begin with %s startup substeps.",
+                len(self.evolve_times),
+                target_steps,
+                self.latest_evolve_time,
+                target_time,
+                self.startup_substeps_n,
+            )
+
+            new_mps = self._run_startup_substeps(evolve_dt)
+            self.evolve_times.append(self.latest_evolve_time + evolve_dt)
+            self.process_mps(new_mps)
+            self.latest_mps = new_mps
+
+            evolution_wall_time = datetime.now()
+            time_cost = evolution_wall_time - wall_times[-1]
+            wall_times.append(evolution_wall_time)
+
+            if self.info_interval is not None:
+                mps_abstract = str(new_mps)
+                bond_dims = _state_bond_dims(new_mps)
+                if bond_dims is not None:
+                    mps_abstract += f" bond_dims={bond_dims}"
+                self._dump_mps = self.dump_mps
+            else:
+                mps_abstract = ""
+                self._dump_mps = None
+
+            logger.info(
+                "step %s complete, time cost %s. %s",
+                len(self.evolve_times) - 1,
+                time_cost,
+                mps_abstract,
+            )
+
+            if self._defined_output_path:
+                try:
+                    self.dump_dict()
+                except IOError:
+                    logger.exception("dumping dict failed with IOError")
+                dump_wall_time = datetime.now()
+                logger.info(f"Dumping time cost {dump_wall_time - evolution_wall_time}")
+
+            if self.stop_evolve_criteria():
+                logger.info("Criteria to stop the evolution has met. Stop the evolution")
+                logger.info(f"{len(wall_times)-1} steps of evolution complete!")
+                logger.info("Normal termination. Time cost: %s", wall_times[-1] - wall_times[0])
+                return self
+
+            nsteps -= 1
+
         for i in range(nsteps):
             if self.stop_evolve_criteria():
                 logger.info("Criteria to stop the evolution has met. Stop the evolution")
@@ -292,6 +371,8 @@ class MultisetChargeDiffusionDynamics(MultisetTdJob):
         dump_mps: str = None,
         dump_dir: str = None,
         job_name: str = None,
+        if_startup_substeps: bool = False,
+        startup_substeps_n: int = 10,
     ):
         if ms_model is None:
             if model is None or max_bonddim is None:
@@ -332,6 +413,8 @@ class MultisetChargeDiffusionDynamics(MultisetTdJob):
             dump_mps=dump_mps,
             dump_dir=dump_dir,
             job_name=job_name,
+            if_startup_substeps=if_startup_substeps,
+            startup_substeps_n=startup_substeps_n,
         )
 
     def init_mp(self, method=None):
@@ -450,14 +533,14 @@ class MultisetChargeDiffusionDynamics(MultisetTdJob):
 
     def process_mps(self, mps):
         self.ms_model.set_mps(mps)
-
         energy = self.ms_model.Hamiltonian()
-        self.energies.append(energy)
-
         rho = mps.rho_el()
         e_occupations = mps.e_occupations_multiset
+        ph_occupations = mps.ph_occupations_multiset
+        self.energies.append(energy)
+
         self.e_occupations_array.append(e_occupations)
-        self.ph_occupations_array.append(mps.ph_occupations_multiset)
+        self.ph_occupations_array.append(ph_occupations)
         self.r_square_array.append(_calc_r_square_multiset(e_occupations))
         self.reduced_density_matrices.append(rho)
         self.coherent_length_array.append(np.abs(rho).sum() - np.trace(rho).real)
