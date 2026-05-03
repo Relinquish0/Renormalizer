@@ -1,37 +1,41 @@
 #!/bin/bash
-#SBATCH --job-name=transport_kubo
+#SBATCH --job-name=fmo_chi32
 #SBATCH --nodes=1
-#SBATCH --ntasks=1         # Nodes * GPUs-per-node * Ranks-per-GPU
+#SBATCH --ntasks=1        # Nodes * GPUs-per-node * Ranks-per-GPU
 #SBATCH --gpus-per-node=1   # Specify the GPUs-per-node
 #SBATCH -p 4A100,4V100
 #SBATCH --qos=normal          # Depending on your needs
-#SBATCH --output=transport_kubo.log
-#SBATCH --error=transport_kubo.log
+#SBATCH --output=fmo_chi32.log
+#SBATCH --error=fmo_chi32.log
 
-# Below are executing commands
-# nvidia-smi dmon -s pucvmte -o T > nvdmon_job-$SLURM_JOB_ID.log &
+export MAX_BONDDIM=32
+export EVOLVE_DT=160
+export EVOLVE_TIME=40000
 
-# your job script
 source $HOME/.bashrc
 source /software/envs/anaconda3.env
 
 module load cuda/12.4
+CUPY_ACCELERATORS=cutensor
 
 conda activate reno
 export PYTHONUNBUFFERED=1
+
 # 显示环境信息用于调试
 echo "=== Environment Information ==="
+
 which python
 python --version
 nvcc --version
+
 echo "==============================="
 
 # 运行主要的Python任务
 echo "Starting"
-python transport_kubo.py std.yaml
+python fmo.py
 echo "Job completed with exit code: $?"
 
 echo "Ending"
 echo "==============================="
-# Must explicitly exit
+
 exit

@@ -66,6 +66,9 @@ class MultisetModel:
         self._active_pairs_by_alpha: List[List[int]] = [[] for _ in range(self.N_electron)]
         self._site_group_templates = []
         self._qr_qn_plan_cache = {}
+        self._reuse_environ_cache = True
+        self._environ_cache = None
+        self._environ_cache_token_counter = 0
         self._refresh_mpo_cache()
         self.MsMps = None
         if auto_init:
@@ -148,6 +151,7 @@ class MultisetModel:
         self.init_model = Model(basis=self.basis_set, ham_terms=init_terms)
 
     def _refresh_mpo_cache(self):
+        self._environ_cache = None
         active_pairs = []
         active_pair_mpos = []
         active_pairs_by_alpha = [[] for _ in range(self.N_electron)]
@@ -217,6 +221,90 @@ class MultisetModel:
         for i, alpha in enumerate(alpha_idx):
             scatter[alpha, i] = 1.0
         return scatter
+
+    def _invalidate_environ_cache(self):
+        self._environ_cache = None
+
+    def _environ_cache_signature(self, ms_mps: MultisetMps):
+        ref_mps = ms_mps.msmps[0]
+        state_token = getattr(ms_mps, "_environ_cache_token", id(ms_mps))
+        return (
+            state_token,
+            len(self._active_pairs),
+            len(ref_mps),
+            ref_mps.to_right,
+            ref_mps.qnidx,
+        )
+
+    def _has_valid_environ_cache(self, ms_mps: MultisetMps) -> bool:
+        if not self._reuse_environ_cache or self._environ_cache is None:
+            return False
+        if self._environ_cache["signature"] != self._environ_cache_signature(ms_mps):
+            return False
+        if len(self._environ_cache["envs"]) != len(self._active_pairs):
+            return False
+        return True
+
+    def _build_environ_list(self, ms_mps: MultisetMps, conj_mps):
+        return [
+            Environ(
+                ms_mps.msmps[self._active_beta[pair_id]],
+                self._active_pair_mpos[pair_id],
+                mps_conj=conj_mps[self._active_alpha[pair_id]],
+            )
+            for pair_id in range(len(self._active_pairs))
+        ]
+
+    def _get_or_build_environ_list(self, ms_mps: MultisetMps, conj_mps):
+        if self._has_valid_environ_cache(ms_mps):
+            return self._environ_cache["envs"]
+        environ_list = self._build_environ_list(ms_mps, conj_mps)
+        self._environ_cache = {
+            "signature": self._environ_cache_signature(ms_mps),
+            "envs": environ_list,
+        }
+        return environ_list
+
+    def _store_environ_cache(self, ms_mps: MultisetMps, environ_list):
+        if not hasattr(ms_mps, "_environ_cache_token"):
+            ms_mps._environ_cache_token = self._environ_cache_token_counter
+            self._environ_cache_token_counter += 1
+        self._environ_cache = {
+            "signature": self._environ_cache_signature(ms_mps),
+            "envs": environ_list,
+        }
+
+    def _compute_multiset_norm(self, ms_mps: MultisetMps):
+        total_tn_coeff = 0.0
+        for alpha in range(ms_mps.N_electron):
+            total_tn_coeff += ms_mps.msmps[alpha].conj().dot(ms_mps.msmps[alpha])
+        return total_tn_coeff**0.5
+
+    def _rescale_environ_cache_after_normalize(self, ms_mps: MultisetMps, scale_factor):
+        if not self._has_valid_environ_cache(ms_mps):
+            return
+
+        ref_mps = ms_mps.msmps[0]
+        site_num = len(ref_mps)
+        scale_sq = (scale_factor * np.conjugate(scale_factor)).real
+        if np.allclose(scale_sq, 1.0):
+            return
+
+        if ref_mps.to_right and ref_mps.qnidx == 0:
+            domain = "L"
+            affected_indices = range(0, site_num - 1)
+        elif (not ref_mps.to_right) and ref_mps.qnidx == site_num - 1:
+            domain = "R"
+            affected_indices = range(1, site_num)
+        else:
+            self._invalidate_environ_cache()
+            return
+
+        for environ in self._environ_cache["envs"]:
+            for siteidx in affected_indices:
+                key = (domain, siteidx)
+                if key in environ._virtual_disk:
+                    environ._virtual_disk[key] *= scale_sq
 
     def _get_qr_qn_plan(self, qnbigl, qnbigr, qntot):
         cache_key = (
@@ -367,6 +455,7 @@ class MultisetModel:
             msmps=msmps,
         )
         self.MsMps.ms_normalize("mps_only")
+        self._invalidate_environ_cache()
         return self.MsMps
 
     def set_mps(self, ms_mps: MultisetMps):
@@ -378,7 +467,9 @@ class MultisetModel:
 
         new_msmps = method(ms_mps_=ms_mps, ms_mpo=self.MsMpo, evolve_dt=evolve_dt)
         if normalize:
+            norm = self._compute_multiset_norm(new_msmps)
             new_msmps.ms_normalize("mps_only")
+            self._rescale_environ_cache_after_normalize(new_msmps, 1.0 / norm)
         return new_msmps
 
     def evolve(self, evolve_dt, normalize=True):
@@ -387,23 +478,20 @@ class MultisetModel:
     def _ms_evolve_tdvp_ps(self, ms_mps_: MultisetMps, ms_mpo: MultisetMpo, evolve_dt) -> "Mps":
         if np.iscomplex(evolve_dt):
             ms_mps = ms_mps_.copy()
+            if hasattr(ms_mps_, "_environ_cache_token"):
+                ms_mps._environ_cache_token = ms_mps_._environ_cache_token
             if self.evolve_config.ivp_solver != "krylov":
                 evolve_dt = -evolve_dt.imag
                 coef = -1
         else:
             ms_mps = ms_mps_.to_complex()
+            if hasattr(ms_mps_, "_environ_cache_token"):
+                ms_mps._environ_cache_token = ms_mps_._environ_cache_token
             if self.evolve_config.ivp_solver != "krylov":
                 coef = 1j
 
         conj_mps = [mps_alpha.conj() for mps_alpha in ms_mps.msmps]
-        Environ_list = [
-            Environ(
-                ms_mps.msmps[self._active_beta[pair_id]],
-                self._active_pair_mpos[pair_id],
-                mps_conj=conj_mps[self._active_alpha[pair_id]],
-            )
-            for pair_id in range(len(self._active_pairs))
-        ]
+        Environ_list = self._get_or_build_environ_list(ms_mps, conj_mps)
 
         local_steps = []
         for i in range(2):
@@ -533,6 +621,7 @@ class MultisetModel:
         steps_stat = stats.describe(local_steps)
         logger.debug(f"TDVP-PS Krylov space: {steps_stat}")
         self.evolve_config.stat = steps_stat
+        self._store_environ_cache(ms_mps, Environ_list)
 
         return ms_mps
 

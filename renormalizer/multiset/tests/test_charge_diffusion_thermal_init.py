@@ -5,6 +5,7 @@ import numpy as np
 from renormalizer.model import HolsteinModel, Mol, Phonon
 from renormalizer.mps import MpDm, Mps
 from renormalizer.mps.backend import xp
+import renormalizer.multiset.multiset_model as multiset_model
 import renormalizer.multiset.multiset_tdjob as multiset_tdjob
 from renormalizer.multiset.multiset_model import MultisetModel
 from renormalizer.multiset.multiset_mps import MultisetMps
@@ -36,6 +37,15 @@ def _build_uninitialized_job(method, model=None, temperature=Quantity(300, "K"),
     job.initial_site = ms_model.N_electron // 2
     job.use_init_hint = True
     return job
+
+
+def _build_charge_diffusion_job(model=None, max_bonddim=8):
+    return MultisetChargeDiffusionDynamics(
+        model=_build_small_model(electronic_coupling=0.02) if model is None else model,
+        max_bonddim=max_bonddim,
+        temperature=Quantity(0, "K"),
+        stop_at_edge=False,
+    )
 
 
 def test_imaginary_time_propagate_returns_ground_state_thermal_mpdm():
@@ -175,3 +185,42 @@ def test_multiset_mps_calculates_electron_and_phonon_occupations():
 
     assert np.allclose(state.e_occupations_multiset, [0.25, 0.75])
     assert np.allclose(state.ph_occupations_multiset, [0.25, 1.5])
+
+
+def test_multiset_model_reuses_environ_cache_on_second_timestep(monkeypatch):
+    job = _build_charge_diffusion_job(max_bonddim=4)
+    environ_init_count = 0
+    original_init = multiset_model.Environ.__init__
+
+    def counting_init(self, *args, **kwargs):
+        nonlocal environ_init_count
+        environ_init_count += 1
+        return original_init(self, *args, **kwargs)
+
+    monkeypatch.setattr(multiset_model.Environ, "__init__", counting_init)
+
+    job.evolve(evolve_dt=0.05, nsteps=1)
+    first_step_inits = environ_init_count
+    environ_init_count = 0
+
+    job.evolve(evolve_dt=0.05, nsteps=1)
+
+    assert first_step_inits > 0
+    assert environ_init_count == 0
+
+
+def test_multiset_model_environ_cache_matches_rebuild_path():
+    model = _build_small_model(displacements=(0.1, 0.2), electronic_coupling=0.02)
+    cached_job = _build_charge_diffusion_job(model=model, max_bonddim=4)
+    rebuilt_job = _build_charge_diffusion_job(model=model, max_bonddim=4)
+    rebuilt_job.ms_model._reuse_environ_cache = False
+
+    for _ in range(2):
+        cached_job.evolve(evolve_dt=0.05, nsteps=1)
+        rebuilt_job.evolve(evolve_dt=0.05, nsteps=1)
+
+    assert np.allclose(cached_job.latest_mps.rho_el(), rebuilt_job.latest_mps.rho_el())
+    assert np.allclose(cached_job.e_occupations_array[-1], rebuilt_job.e_occupations_array[-1])
+    assert [mps.bond_dims for mps in cached_job.latest_mps.msmps] == [
+        mps.bond_dims for mps in rebuilt_job.latest_mps.msmps
+    ]

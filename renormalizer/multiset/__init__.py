@@ -7,5 +7,4 @@ from renormalizer.multiset.multisetspectra import MultisetSpectraFiniteT, Multis
 from renormalizer.multiset.multiset_tdjob import (
     MultisetChargeDiffusionDynamics,
     MultisetTdJob,
-    MultisetTransportKubo,
 )
