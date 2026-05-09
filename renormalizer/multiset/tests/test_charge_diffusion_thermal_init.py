@@ -187,6 +187,53 @@ def test_multiset_mps_calculates_electron_and_phonon_occupations():
     assert np.allclose(state.ph_occupations_multiset, [0.25, 1.5])
 
 
+def test_multiset_e_occupations_do_not_require_full_rho(monkeypatch):
+    job = _build_uninitialized_job("imaginary_time_propagate")
+    dofs = job.ms_model.init_model.v_dofs
+
+    mps0 = MpDm.from_mps(
+        Mps.hartree_product_state(
+            job.ms_model.init_model,
+            condition={dofs[0]: 1, dofs[1]: 0},
+        )
+    )
+    mps1 = MpDm.from_mps(
+        Mps.hartree_product_state(
+            job.ms_model.init_model,
+            condition={dofs[0]: 0, dofs[1]: 2},
+        )
+    )
+    mps0.scale(np.sqrt(0.25), inplace=True)
+    mps1.scale(np.sqrt(0.75), inplace=True)
+
+    state = MultisetMps(
+        job.ms_model.MsModel,
+        job.ms_model.N_electron,
+        init_model=job.ms_model.init_model,
+        msmps=[mps0, mps1],
+    )
+
+    def fail_rho(*args, **kwargs):
+        raise AssertionError("full rho_el should not be needed for e_occupations_multiset")
+
+    monkeypatch.setattr(MultisetMps, "rho_el", fail_rho)
+
+    assert np.allclose(state.e_occupations_multiset, [0.25, 0.75])
+
+
+def test_process_mps_skips_rho_when_density_observables_are_disabled(monkeypatch):
+    job = _build_charge_diffusion_job(max_bonddim=4)
+
+    def fail_rho(*args, **kwargs):
+        raise AssertionError("rho_el should not be computed when density observables are disabled")
+
+    monkeypatch.setattr(MultisetMps, "rho_el", fail_rho)
+
+    job.process_mps(job.latest_mps)
+
+    assert len(job.e_occupations_array) >= 1
+
+
 def test_multiset_model_reuses_environ_cache_on_second_timestep(monkeypatch):
     job = _build_charge_diffusion_job(max_bonddim=4)
     environ_init_count = 0

@@ -12,7 +12,7 @@ from renormalizer.model.op import Op
 from renormalizer.mps import Mps
 from renormalizer.mps.backend import xp
 from renormalizer.mps.lib import Environ, _sum
-from renormalizer.mps.matrix import asxp, tensordot
+from renormalizer.mps.matrix import asnumpy, asxp, tensordot
 from renormalizer.mps.mpo import Mpo
 from renormalizer.mps.mps import expand_bond_dimension_general
 from renormalizer.multiset.multiset_mpo import MultisetMpo

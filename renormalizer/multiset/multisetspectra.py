@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 
 import logging
+from typing import Union
 
 import numpy as np
 
@@ -24,11 +25,21 @@ def _state_inner_product(bra, ket) -> complex:
     )
 
 
-def _multiset_overlap(bra: MultisetMps, ket: MultisetMps) -> complex:
-    total = 0j
+def _multiset_pair_overlaps(bra: MultisetMps, ket: MultisetMps) -> np.ndarray:
+    overlaps = np.zeros((bra.N_electron, ket.N_electron), dtype=np.complex128)
     for alpha in range(bra.N_electron):
-        total += _state_inner_product(bra.msmps[alpha], ket.msmps[alpha])
-    return complex(total)
+        for beta in range(ket.N_electron):
+            overlaps[alpha, beta] = _state_inner_product(bra.msmps[alpha], ket.msmps[beta])
+    return overlaps
+
+
+def _multiset_overlap(
+    bra: MultisetMps, ket: MultisetMps, return_pair_overlaps: bool = False
+) -> Union[complex, np.ndarray]:
+    overlaps = _multiset_pair_overlaps(bra, ket)
+    if return_pair_overlaps:
+        return overlaps
+    return complex(np.trace(overlaps))
 
 
 def _multiset_dipole_overlap(bra: MultisetMps, ket: MultisetMps, dipole) -> complex:
@@ -42,11 +53,7 @@ def _multiset_dipole_overlap(bra: MultisetMps, ket: MultisetMps, dipole) -> comp
 
 
 def _multiset_cross_overlap(bra: MultisetMps, ket: MultisetMps) -> complex:
-    total = 0j
-    for alpha in range(bra.N_electron):
-        for beta in range(ket.N_electron):
-            total += _state_inner_product(bra.msmps[alpha], ket.msmps[beta])
-    return complex(total)
+    return complex(_multiset_pair_overlaps(bra, ket).sum())
 
 
 def _scale_multiset_state(state: MultisetMps, factor: float) -> MultisetMps:
@@ -77,6 +84,7 @@ class MultisetSpectraZeroT(MultisetTdJob):
         self.temperature = Quantity(0, "K")
         self.expand = expand
         self._autocorr = []
+        self._autocorr_components = []
         self._bond_dims = []
 
         if model is None or max_bonddim is None:
@@ -127,17 +135,25 @@ class MultisetSpectraZeroT(MultisetTdJob):
     def process_mps(self, mps):
         bra, ket = mps
         if isinstance(bra, MultisetMps):
+            component_autocorr = _multiset_overlap(bra, ket, return_pair_overlaps=True)
             if self.spectratype == "emi":
-                self._autocorr.append(_multiset_cross_overlap(bra, ket))
+                self._autocorr.append(complex(component_autocorr.sum()))
             else:
-                self._autocorr.append(_multiset_overlap(bra, ket))
+                self._autocorr.append(complex(np.trace(component_autocorr)))
+            self._autocorr_components.append(component_autocorr)
         else:
-            self._autocorr.append(complex(bra.conj().dot(ket)))
+            component_autocorr = np.asarray([[complex(bra.conj().dot(ket))]])
+            self._autocorr.append(component_autocorr[0, 0])
+            self._autocorr_components.append(component_autocorr)
         self._bond_dims.append(_state_bond_dims(mps))
 
     @property
     def autocorr(self):
         return np.array(self._autocorr)
+
+    @property
+    def autocorr_components(self):
+        return np.array(self._autocorr_components)
 
     @property
     def bond_dims(self):
@@ -149,6 +165,7 @@ class MultisetSpectraZeroT(MultisetTdJob):
             "time series": self.evolve_times,
             "time_series": self.evolve_times,
             "autocorr": self.autocorr,
+            "autocorr_components": self.autocorr_components,
             "bond_dims": self.bond_dims,
         }
 
@@ -254,6 +271,7 @@ class MultisetSpectraFiniteT(MultisetTdJob):
         self.offset = offset
         self.expand = expand
         self._autocorr = []
+        self._autocorr_components = []
         self._bond_dims = []
 
         if model is None or max_bonddim is None:
@@ -542,15 +560,19 @@ class MultisetSpectraFiniteT(MultisetTdJob):
     def process_mps(self, mps):
         bra, ket = mps
         if isinstance(bra, MultisetMps):
+            component_autocorr = _multiset_pair_overlaps(bra, ket)
             if self.spectratype == "emi":
-                ft = _multiset_cross_overlap(bra, ket)
+                ft = np.conjugate(complex(component_autocorr.sum()))
+                component_autocorr = np.conjugate(component_autocorr)
             else:
-                ft = _multiset_overlap(bra, ket)
+                ft = complex(np.trace(component_autocorr))
         else:
             ft = _state_inner_product(bra, ket)
-        if self.spectratype == "emi":
-            ft = np.conjugate(ft)
+            if self.spectratype == "emi":
+                ft = np.conjugate(ft)
+            component_autocorr = np.asarray([[ft]])
         self._autocorr.append(ft)
+        self._autocorr_components.append(component_autocorr)
         self._bond_dims.append(_state_bond_dims(mps))
 
     def stop_evolve_criteria(self):
@@ -559,6 +581,10 @@ class MultisetSpectraFiniteT(MultisetTdJob):
     @property
     def autocorr(self):
         return np.array(self._autocorr)
+
+    @property
+    def autocorr_components(self):
+        return np.array(self._autocorr_components)
 
     @property
     def bond_dims(self):
@@ -570,6 +596,7 @@ class MultisetSpectraFiniteT(MultisetTdJob):
             "time series": self.evolve_times,
             "time_series": self.evolve_times,
             "autocorr": self.autocorr,
+            "autocorr_components": self.autocorr_components,
             "bond_dims": self.bond_dims,
         }
 

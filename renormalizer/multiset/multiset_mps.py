@@ -127,7 +127,10 @@ class MultisetMps:
 
     @property
     def e_occupations_multiset(self):
-        return np.diag(self.rho_el()).real
+        occupations = np.empty(self.N_electron, dtype=np.float64)
+        for alpha, mps in enumerate(self.msmps):
+            occupations[alpha] = mps.conj().dot(mps).real
+        return occupations
 
     @property
     def ph_occupations_multiset(self):

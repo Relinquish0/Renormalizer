@@ -25,12 +25,14 @@ def test_multiset_spectra_zerot_bootstrap_autocorr():
     bra, ket = job.latest_mps
 
     assert len(job.autocorr) == 1
+    assert job.autocorr_components.shape == (1, bra.N_electron, ket.N_electron)
     assert bra.N_electron == ket.N_electron == job.model.n_edofs
     assert all(
         [site.shape for site in bra.msmps[a]] == [site.shape for site in ket.msmps[a]]
         for a in range(ket.N_electron)
     )
     assert np.isfinite(job.autocorr[0].real)
+    assert np.allclose(job.autocorr[0], np.trace(job.autocorr_components[0]))
 
 
 def test_multiset_spectra_zerot_emi_stays_in_multiset_container():
@@ -45,6 +47,7 @@ def test_multiset_spectra_zerot_emi_stays_in_multiset_container():
     assert isinstance(ket, MultisetMps)
     assert job.evolve_config.method is MsEvolveMethod.ms_evolve_tdvp_ps
     assert np.isclose(job.autocorr[0].real, 4.0)
+    assert np.allclose(job.autocorr[0], job.autocorr_components[0].sum())
 
 
 @pytest.mark.parametrize("spectratype", ["abs", "emi"])
@@ -74,6 +77,7 @@ def test_multiset_spectra_zerot_one_step_updates_autocorr():
     bra1, ket1 = job.latest_mps
 
     assert len(job.autocorr) == 2
+    assert job.autocorr_components.shape == (2, bra0.N_electron, ket0.N_electron)
     assert np.isfinite(job.autocorr[-1].real)
     assert np.allclose(
         [bra0.msmps[a].conj().dot(bra1.msmps[a]) for a in range(bra0.N_electron)],
@@ -104,3 +108,19 @@ def test_multiset_spectra_zerot_dipole_changes_t0_autocorr():
 def test_multiset_spectra_zerot_requires_model_and_max_bonddim():
     with pytest.raises(ValueError, match="model.*max_bonddim"):
         MultisetSpectraZeroT(model=_build_small_model())
+
+
+def test_multiset_spectra_zerot_dump_dict_contains_component_autocorr():
+    job = MultisetSpectraZeroT(
+        model=_build_small_model(),
+        max_bonddim=4,
+    )
+
+    dump_dict = job.get_dump_dict()
+
+    assert "autocorr_components" in dump_dict
+    assert dump_dict["autocorr_components"].shape == (
+        len(job.autocorr),
+        job.model.n_edofs,
+        job.model.n_edofs,
+    )
