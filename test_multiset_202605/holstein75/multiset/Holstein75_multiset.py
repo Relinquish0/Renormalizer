@@ -7,10 +7,60 @@ from renormalizer.utils import Quantity, EvolveConfig, CompressConfig, CompressC
 from renormalizer.utils.constant import cm2au
 from renormalizer.transport import ChargeDiffusionDynamics, InitElectron
 from renormalizer.multiset import MultisetChargeDiffusionDynamics
+import renormalizer.lib as reno_lib
+import renormalizer.multiset.multiset_model as multiset_model
+import renormalizer.mps.mps as mps_model
+from renormalizer.lib.krylov.krylov import _expm_krylov as _project_krylov
+from renormalizer.mps.backend import USE_GPU, xp
 
 import numpy as np
 import pandas as pd
 from renormalizer.utils.log import package_logger as logger
+
+KRYLOV_BLOCK_SIZE = 32
+
+
+def _expm_krylov_fixed32(Afunc, dt, vstart, block_size=KRYLOV_BLOCK_SIZE):
+    if not np.iscomplex(dt):
+        dt = dt.real
+
+    vstart = xp.asarray(vstart)
+    nrmv = float(xp.linalg.norm(vstart))
+    assert nrmv > 0
+
+    if len(vstart) < KRYLOV_BLOCK_SIZE:
+        raise ValueError(
+            f"Vector dimension {len(vstart)} is smaller than the forced Krylov depth {KRYLOV_BLOCK_SIZE}"
+        )
+
+    vstart = vstart / nrmv
+    alpha = np.zeros(KRYLOV_BLOCK_SIZE)
+    beta = np.zeros(KRYLOV_BLOCK_SIZE - 1)
+    V = xp.empty((KRYLOV_BLOCK_SIZE, len(vstart)), dtype=vstart.dtype)
+    V[0] = vstart
+
+    for j in range(KRYLOV_BLOCK_SIZE):
+        w = Afunc(V[j])
+        alpha[j] = xp.vdot(w, V[j]).real
+
+        if j == KRYLOV_BLOCK_SIZE - 1:
+            break
+
+        w -= alpha[j] * V[j] + (beta[j - 1] * V[j - 1] if j > 0 else 0)
+        beta[j] = float(xp.linalg.norm(w))
+        if beta[j] < 100 * len(vstart) * np.finfo(float).eps:
+            raise RuntimeError(
+                f"Forced 32-layer Krylov broke down at layer {j + 1}; "
+                "the current vector cannot support a strict 32-layer Lanczos build."
+            )
+        V[j + 1] = w / beta[j]
+
+    return _project_krylov(alpha, beta, V.T, nrmv, dt), KRYLOV_BLOCK_SIZE
+
+
+reno_lib.expm_krylov = _expm_krylov_fixed32
+multiset_model.expm_krylov = _expm_krylov_fixed32
+mps_model.expm_krylov = _expm_krylov_fixed32
 
 # ── 参数设定 ──────────────────────────────────  
 N      = 75    # 格点数（电子数量）  
@@ -57,10 +107,9 @@ dynamics_job = MultisetChargeDiffusionDynamics(
     startup_substeps_n=startup_substeps_n,
 )
 
-from renormalizer.mps.backend import USE_GPU, xp  
-
 logger.info(f"GPU enabled: {USE_GPU}")  
 logger.info(f"Backend: {'CuPy' if USE_GPU else 'NumPy'}")
+logger.info("forced fixed Krylov layers:%d", KRYLOV_BLOCK_SIZE)
 logger.info("maximum bond dimension:%d, evolve time step:%s", max_bonddim, evolve_dt)
 logger.info("number of stored snapshots:%d", n_snapshots)
 logger.info("startup substeps enabled:%s, count:%d", if_startup_substeps, startup_substeps_n)

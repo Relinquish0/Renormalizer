@@ -16,7 +16,13 @@ from renormalizer.mps.matrix import asnumpy, asxp, tensordot
 from renormalizer.mps.mpo import Mpo
 from renormalizer.mps.mps import expand_bond_dimension_general
 from renormalizer.multiset.multiset_mpo import MultisetMpo
-from renormalizer.multiset.multiset_mps import MsEvolveMethod, MultisetMps
+from renormalizer.multiset.multiset_mps import (
+    ElectronicAncillaMultisetMps,
+    MsEvolveMethod,
+    MultisetMps,
+    _state_expectation,
+    _state_inner_product,
+)
 from renormalizer.utils import CompressConfig, CompressCriteria, EvolveConfig, Quantity
 
 logger = logging.getLogger(__name__)
@@ -275,9 +281,11 @@ class MultisetModel:
         }
 
     def _compute_multiset_norm(self, ms_mps: MultisetMps):
+        if getattr(ms_mps, "electronic_ancilla", False):
+            return ms_mps.total_norm() ** 0.5
         total_tn_coeff = 0.0
         for alpha in range(ms_mps.N_electron):
-            total_tn_coeff += ms_mps.msmps[alpha].conj().dot(ms_mps.msmps[alpha])
+            total_tn_coeff += _state_inner_product(ms_mps.msmps[alpha], ms_mps.msmps[alpha])
         return total_tn_coeff**0.5
 
     def _rescale_environ_cache_after_normalize(self, ms_mps: MultisetMps, scale_factor):
@@ -465,7 +473,15 @@ class MultisetModel:
     def evolve_state(self, ms_mps: MultisetMps, evolve_dt, normalize=True) -> MultisetMps:
         method = {MsEvolveMethod.ms_evolve_tdvp_ps: self._ms_evolve_tdvp_ps}[self.evolve_config.method]
 
-        new_msmps = method(ms_mps_=ms_mps, ms_mpo=self.MsMpo, evolve_dt=evolve_dt)
+        if getattr(ms_mps, "electronic_ancilla", False):
+            new_msmps = ms_mps.copy()
+            for ancilla in range(ms_mps.n_anc):
+                block_state = ms_mps.block_state(ancilla)
+                evolved_block = method(ms_mps_=block_state, ms_mpo=self.MsMpo, evolve_dt=evolve_dt)
+                for alpha in range(ms_mps.N_electron):
+                    new_msmps.set(alpha, ancilla, evolved_block.msmps[alpha])
+        else:
+            new_msmps = method(ms_mps_=ms_mps, ms_mpo=self.MsMpo, evolve_dt=evolve_dt)
         if normalize:
             norm = self._compute_multiset_norm(new_msmps)
             new_msmps.ms_normalize("mps_only")
@@ -626,6 +642,18 @@ class MultisetModel:
         return ms_mps
 
     def expand_bond_dimension_multiset(self, coef: float = 1e-10, use_hint: bool = True):
+        if getattr(self.MsMps, "electronic_ancilla", False):
+            source_state = self.MsMps
+            expanded_state = source_state.copy()
+            for ancilla in range(source_state.n_anc):
+                block_state = source_state.block_state(ancilla)
+                self.MsMps = block_state
+                self.expand_bond_dimension_multiset(coef=coef, use_hint=use_hint)
+                for alpha in range(block_state.N_electron):
+                    expanded_state.set(alpha, ancilla, self.MsMps.msmps[alpha])
+            self.MsMps = expanded_state
+            return
+
         for alpha in range(self.N_electron):
             self.MsMps.msmps[alpha].compress_config = self.compress_config
 
@@ -682,13 +710,23 @@ class MultisetModel:
 
     def Hamiltonian(self):
         num = 0.0
-        bras = [self.MsMps.msmps[a].conj() for a in range(self.N_electron)]
-        for pair_id, (alpha, beta) in enumerate(self._active_pairs):
-            num += self.MsMps.msmps[beta].expectation(
-                mpo=self._active_pair_mpos[pair_id],
-                self_conj=bras[alpha],
-            )
-        den = sum(bras[a].dot(self.MsMps.msmps[a]) for a in range(self.N_electron))
+        if getattr(self.MsMps, "electronic_ancilla", False):
+            for ancilla in range(self.MsMps.n_anc):
+                for pair_id, (alpha, beta) in enumerate(self._active_pairs):
+                    num += _state_expectation(
+                        self.MsMps.get(alpha, ancilla),
+                        self.MsMps.get(beta, ancilla),
+                        self._active_pair_mpos[pair_id],
+                    )
+            den = self.MsMps.total_norm()
+        else:
+            for pair_id, (alpha, beta) in enumerate(self._active_pairs):
+                num += _state_expectation(
+                    self.MsMps.msmps[alpha],
+                    self.MsMps.msmps[beta],
+                    self._active_pair_mpos[pair_id],
+                )
+            den = sum(_state_inner_product(mps, mps) for mps in self.MsMps.msmps)
         return (num / den).real
 
     def rho_el(self):
@@ -703,7 +741,9 @@ class MultisetModel:
         return tr, purity, rho
 
     def Inner_product(self) -> "float":
-        return self.MsMps.total_mps().conj().dot(self.MsMps.total_mps())
+        if getattr(self.MsMps, "electronic_ancilla", False):
+            return self.MsMps.total_norm()
+        return sum(_state_inner_product(mps, mps) for mps in self.MsMps.msmps)
 
     def _apply_hop_batched(self, Y, batched_groups, dim, shape):
         N = self.N_electron

@@ -5,7 +5,7 @@ import numpy as np
 from renormalizer.model.model import Model
 from renormalizer.mps.lib import _sum
 from renormalizer.mps.mpo import Mpo
-from renormalizer.multiset.multiset_mps import MultisetMps
+from renormalizer.multiset.multiset_mps import MultisetMps, _state_expectation
 from renormalizer.utils import CompressConfig
 
 
@@ -71,6 +71,41 @@ class MultisetBlockMpo(MultisetMpo):
         return len(self._active_pairs) != 0
 
     def apply(self, ms_state: MultisetMps) -> MultisetMps:
+        if getattr(ms_state, "electronic_ancilla", False):
+            new_state = ms_state.copy()
+            zero_template = ms_state.msmps[0].copy()
+            zero_template.scale(0.0, inplace=True)
+            zero_template.coeff = 1.0
+            if self.compress_config is not None:
+                zero_template.compress_config = self.compress_config
+
+            for ancilla in range(ms_state.n_anc):
+                for alpha in range(self.N_electron):
+                    contributions = []
+                    for beta in range(self.N_electron):
+                        mpo = self.msmpo[alpha][beta]
+                        if len(mpo) == 0:
+                            continue
+                        source = ms_state.get(beta, ancilla)
+                        if self.compress_config is not None:
+                            source.compress_config = self.compress_config
+                        applied = mpo.contract(source)
+                        applied.normalize("mps_norm_to_coeff")
+                        if self.compress_config is not None:
+                            applied.compress_config = self.compress_config
+                        contributions.append(applied)
+
+                    if len(contributions) == 0:
+                        new_state.set(alpha, ancilla, zero_template.copy())
+                    elif len(contributions) == 1:
+                        new_state.set(alpha, ancilla, contributions[0])
+                    else:
+                        combined = _sum(contributions, compress=True, temp_m_trunc=None)
+                        if self.compress_config is not None:
+                            combined.compress_config = self.compress_config
+                        new_state.set(alpha, ancilla, combined)
+            return new_state
+
         new_state = MultisetMps.__new__(MultisetMps)
         new_state.MsModel = ms_state.MsModel
         new_state.N_electron = ms_state.N_electron
@@ -113,14 +148,19 @@ class MultisetBlockMpo(MultisetMpo):
 
     def matrix_element(self, bra_state: MultisetMps, ket_state: MultisetMps) -> complex:
         total = 0j
-        bra_conj = [state.conj() for state in bra_state.msmps]
-        for alpha, beta in self._active_pairs:
-            mpo = self.msmpo[alpha][beta]
-            bra = bra_state.msmps[alpha]
-            ket = ket_state.msmps[beta]
-            total += (
-                ket.expectation(mpo, self_conj=bra_conj[alpha])
-                * np.conjugate(bra.coeff)
-                * ket.coeff
-            )
+        if getattr(bra_state, "electronic_ancilla", False):
+            for ancilla in range(bra_state.n_anc):
+                for alpha, beta in self._active_pairs:
+                    total += _state_expectation(
+                        bra_state.get(alpha, ancilla),
+                        ket_state.get(beta, ancilla),
+                        self.msmpo[alpha][beta],
+                    )
+        else:
+            for alpha, beta in self._active_pairs:
+                total += _state_expectation(
+                    bra_state.msmps[alpha],
+                    ket_state.msmps[beta],
+                    self.msmpo[alpha][beta],
+                )
         return complex(total)

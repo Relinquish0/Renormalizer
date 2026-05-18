@@ -12,6 +12,7 @@
 
 .idea/
 .cache/
+.venv-test/
 
 out/
 opt/

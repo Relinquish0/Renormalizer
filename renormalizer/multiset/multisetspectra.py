@@ -9,7 +9,12 @@ from renormalizer.model.basis import BasisSHO
 from renormalizer.mps import Mpo, MpDm, Mps, ThermalProp
 from renormalizer.mps.lib import _sum
 from renormalizer.multiset.multiset_model import MultisetModel
-from renormalizer.multiset.multiset_mps import MsEvolveMethod, MultisetMps
+from renormalizer.multiset.multiset_mps import (
+    ElectronicAncillaMultisetMps,
+    MsEvolveMethod,
+    MultisetMps,
+    _state_inner_product,
+)
 from renormalizer.multiset.multiset_tdjob import MultisetTdJob, _state_bond_dims
 from renormalizer.utils import CompressConfig, EvolveConfig, EvolveMethod, Quantity
 
@@ -17,16 +22,18 @@ from renormalizer.utils import CompressConfig, EvolveConfig, EvolveMethod, Quant
 logger = logging.getLogger(__name__)
 
 
-def _state_inner_product(bra, ket) -> complex:
-    return complex(
-        bra.conj().dot(ket)
-        * np.conjugate(bra.coeff)
-        * ket.coeff
-    )
-
-
 def _multiset_pair_overlaps(bra: MultisetMps, ket: MultisetMps) -> np.ndarray:
     overlaps = np.zeros((bra.N_electron, ket.N_electron), dtype=np.complex128)
+    if getattr(bra, "electronic_ancilla", False):
+        for alpha in range(bra.N_electron):
+            for beta in range(ket.N_electron):
+                for ancilla in range(bra.n_anc):
+                    overlaps[alpha, beta] += _state_inner_product(
+                        bra.get(alpha, ancilla),
+                        ket.get(beta, ancilla),
+                    )
+        return overlaps
+
     for alpha in range(bra.N_electron):
         for beta in range(ket.N_electron):
             overlaps[alpha, beta] = _state_inner_product(bra.msmps[alpha], ket.msmps[beta])
@@ -44,6 +51,16 @@ def _multiset_overlap(
 
 def _multiset_dipole_overlap(bra: MultisetMps, ket: MultisetMps, dipole) -> complex:
     total = 0j
+    if getattr(bra, "electronic_ancilla", False):
+        for ancilla in range(bra.n_anc):
+            for alpha in range(bra.N_electron):
+                for beta in range(ket.N_electron):
+                    total += float(dipole[alpha]) * float(dipole[beta]) * _state_inner_product(
+                        bra.get(alpha, ancilla),
+                        ket.get(beta, ancilla),
+                    )
+        return complex(total)
+
     for alpha in range(bra.N_electron):
         for beta in range(ket.N_electron):
             total += float(dipole[alpha]) * float(dipole[beta]) * _state_inner_product(
@@ -57,8 +74,8 @@ def _multiset_cross_overlap(bra: MultisetMps, ket: MultisetMps) -> complex:
 
 
 def _scale_multiset_state(state: MultisetMps, factor: float) -> MultisetMps:
-    for alpha in range(state.N_electron):
-        state.msmps[alpha].scale(float(factor), inplace=True)
+    for mps in state.msmps:
+        mps.scale(factor, inplace=True)
     return state
 
 
@@ -256,6 +273,14 @@ class MultisetSpectraFiniteT(MultisetTdJob):
         dump_dir: str = None,
         job_name: str = None,
         expand: bool = True,
+        electronic_ancilla: bool = False,
+        n_electronic_ancilla: int = None,
+        electronic_purification: str = "thermal",
+        electronic_beta: float = None,
+        electronic_temperature: Quantity = None,
+        electronic_initial_distribution=None,
+        electronic_hamiltonian=None,
+        electronic_hamiltonian_source: str = "msmodel",
     ):
         if spectratype not in ["abs", "emi"]:
             raise ValueError(f"Unsupported spectratype: {spectratype}")
@@ -263,6 +288,8 @@ class MultisetSpectraFiniteT(MultisetTdJob):
             raise ValueError("`MultisetSpectraFiniteT` requires a non-zero temperature.")
         if thermal_init_method not in ["imaginary_time_exact", "imaginary_time_propagate"]:
             raise ValueError(f"Unsupported thermal_init_method: {thermal_init_method}")
+        if electronic_purification not in ["thermal", "diagonal"]:
+            raise ValueError(f"Unsupported electronic_purification: {electronic_purification}")
 
         self.spectratype = spectratype
         self.temperature = temperature
@@ -270,6 +297,14 @@ class MultisetSpectraFiniteT(MultisetTdJob):
         self.thermal_init_method = thermal_init_method # "imaginary_time_exact" or "imaginary_time_propagate"
         self.offset = offset
         self.expand = expand
+        self.electronic_ancilla = electronic_ancilla
+        self.n_electronic_ancilla = n_electronic_ancilla
+        self.electronic_purification = electronic_purification
+        self.electronic_beta = electronic_beta
+        self.electronic_temperature = electronic_temperature
+        self.electronic_initial_distribution = electronic_initial_distribution
+        self.electronic_hamiltonian = electronic_hamiltonian
+        self.electronic_hamiltonian_source = electronic_hamiltonian_source
         self._autocorr = []
         self._autocorr_components = []
         self._bond_dims = []
@@ -332,6 +367,102 @@ class MultisetSpectraFiniteT(MultisetTdJob):
         )
         self._set_multiset_hamiltonian_offset(excited_energy + self.offset)
         return ket.copy(), ket
+
+    def _electronic_ancilla_dim(self) -> int:
+        return self.ms_model.N_electron if self.n_electronic_ancilla is None else int(self.n_electronic_ancilla)
+
+    def _electronic_beta_value(self) -> float:
+        if self.electronic_beta is not None:
+            return float(self.electronic_beta)
+        if self.electronic_temperature is not None:
+            return self.electronic_temperature.to_beta()
+        return self.temperature.to_beta()
+
+    def _electronic_hamiltonian_matrix(self) -> np.ndarray:
+        if self.electronic_hamiltonian is not None:
+            h_e = np.asarray(self.electronic_hamiltonian, dtype=np.complex128)
+        elif self.electronic_hamiltonian_source == "msmodel":
+            if not hasattr(self.model, "mol_list") or not hasattr(self.model, "j_matrix"):
+                raise ValueError("`electronic_hamiltonian_source='msmodel'` requires a Holstein-like model.")
+            h_e = np.asarray(self.model.j_matrix, dtype=np.complex128).copy()
+            for alpha, mol in enumerate(self.model.mol_list):
+                h_e[alpha, alpha] = mol.elocalex + mol.e0
+        else:
+            raise ValueError(
+                f"Unsupported electronic_hamiltonian_source: {self.electronic_hamiltonian_source}"
+            )
+
+        if h_e.shape != (self.ms_model.N_electron, self.ms_model.N_electron):
+            raise ValueError(
+                f"Electronic Hamiltonian shape mismatch: expected "
+                f"{(self.ms_model.N_electron, self.ms_model.N_electron)}, got {h_e.shape}."
+            )
+        return h_e
+
+    def _build_electronic_purification_coefficients(self) -> np.ndarray:
+        n_phys = self.ms_model.N_electron
+        n_anc = self._electronic_ancilla_dim()
+
+        if self.electronic_purification == "diagonal":
+            if self.electronic_initial_distribution is None:
+                raise ValueError("`electronic_initial_distribution` is required for diagonal purification.")
+            probs = np.asarray(self.electronic_initial_distribution, dtype=np.float64).reshape(-1)
+            if len(probs) != n_phys:
+                raise ValueError(
+                    f"Electronic initial distribution length mismatch: expected {n_phys}, got {len(probs)}."
+                )
+            probs = probs / probs.sum()
+            nonzero = int(np.count_nonzero(probs > 1e-14))
+            if n_anc < nonzero:
+                raise ValueError("`n_electronic_ancilla` is too small to purify the requested diagonal state.")
+            coeff = np.zeros((n_phys, n_anc), dtype=np.complex128)
+            ancilla_slots = iter(range(n_anc))
+            for alpha, prob in enumerate(probs):
+                if prob <= 1e-14:
+                    continue
+                coeff[alpha, next(ancilla_slots)] = np.sqrt(prob)
+            return coeff
+
+        beta = self._electronic_beta_value()
+        h_e = self._electronic_hamiltonian_matrix()
+        evals, evecs = np.linalg.eigh(h_e)
+        weights = np.exp(-beta * evals.real)
+        weights /= weights.sum()
+        nonzero = int(np.count_nonzero(weights > 1e-14))
+        if n_anc < nonzero:
+            raise ValueError("`n_electronic_ancilla` is too small to purify the thermal electronic state.")
+
+        coeff_full = evecs @ np.diag(np.sqrt(weights))
+        if n_anc == n_phys:
+            return coeff_full
+        if n_anc < n_phys:
+            return coeff_full[:, :n_anc]
+        coeff = np.zeros((n_phys, n_anc), dtype=np.complex128)
+        coeff[:, :n_phys] = coeff_full
+        return coeff
+
+    def _build_electronic_ancilla_state(self, local_state, weights=None):
+        coeff = self._build_electronic_purification_coefficients()
+        if weights is None:
+            weights = np.ones(self.ms_model.N_electron, dtype=np.complex128)
+        weights = np.asarray(weights, dtype=np.complex128).reshape(-1)
+        msmps = []
+        for alpha in range(self.ms_model.N_electron):
+            for ancilla in range(coeff.shape[1]):
+                component = local_state.copy()
+                component.coeff *= weights[alpha] * coeff[alpha, ancilla]
+                component.compress_config = self.icompress_config
+                component.evolve_config = self.evolve_config
+                msmps.append(component)
+        return ElectronicAncillaMultisetMps(
+            self.ms_model.MsModel,
+            self.ms_model.N_electron,
+            temperature=self.temperature,
+            init_model=self.ms_model.init_model,
+            method=self.thermal_init_method,
+            msmps=msmps,
+            n_anc=coeff.shape[1],
+        )
 
     def _init_ground_thermal_state(self):
         if self.thermal_init_method == "imaginary_time_exact":
@@ -406,6 +537,10 @@ class MultisetSpectraFiniteT(MultisetTdJob):
 
     def _init_excited_thermal_state(self):
         method = self.thermal_init_method
+        if self.electronic_ancilla:
+            local_state = self._max_entangled_ground_mpdm(self.ms_model.init_model)
+            return self._propagate_excited_thermal_msmpdm(self._build_electronic_ancilla_state(local_state))
+
         if method == "imaginary_time_exact":
             logger.warning(
                 "Finite-temperature multiset emission does not support a physically exact "
@@ -428,6 +563,16 @@ class MultisetSpectraFiniteT(MultisetTdJob):
         for state in msmps:
             state.compress_config = self.icompress_config
             state.evolve_config = self.evolve_config
+        if self.electronic_ancilla:
+            return ElectronicAncillaMultisetMps(
+                self.ms_model.MsModel,
+                self.ms_model.N_electron,
+                temperature=self.temperature,
+                init_model=self.ms_model.init_model,
+                method=self.thermal_init_method,
+                msmps=msmps,
+                n_anc=self._electronic_ancilla_dim(),
+            )
         return MultisetMps(
             self.ms_model.MsModel,
             self.ms_model.N_electron,
@@ -438,6 +583,9 @@ class MultisetSpectraFiniteT(MultisetTdJob):
         )
 
     def _broadcast_local_state(self, local_state, weights=None):
+        if self.electronic_ancilla:
+            return self._build_electronic_ancilla_state(local_state, weights)
+
         if weights is None:
             weights = np.ones(self.ms_model.N_electron)
         weights = np.asarray(weights, dtype=float)
@@ -456,6 +604,17 @@ class MultisetSpectraFiniteT(MultisetTdJob):
         if not isinstance(state, MultisetMps):
             return self._broadcast_local_state(state, dipole)
 
+        if getattr(state, "electronic_ancilla", False):
+            msmps = []
+            for alpha in range(state.N_electron):
+                for ancilla in range(state.n_anc):
+                    component = state.get(alpha, ancilla).copy()
+                    component.scale(float(dipole[alpha]), inplace=True)
+                    component.compress_config = self.icompress_config
+                    component.evolve_config = self.evolve_config
+                    msmps.append(component)
+            return self._build_multiset_state(msmps)
+
         msmps = []
         for alpha in range(state.N_electron):
             component = state.msmps[alpha].copy()
@@ -469,9 +628,9 @@ class MultisetSpectraFiniteT(MultisetTdJob):
         self.ms_model.set_mps(state)
         self.ms_model.expand_bond_dimension_multiset(coef=coef, use_hint=True)
         expanded_state = self.ms_model.MsMps
-        for alpha in range(expanded_state.N_electron):
-            expanded_state.msmps[alpha].compress_config = self.icompress_config
-            expanded_state.msmps[alpha].evolve_config = self.evolve_config
+        for component in expanded_state.msmps:
+            component.compress_config = self.icompress_config
+            component.evolve_config = self.evolve_config
         return expanded_state
 
     def _set_multiset_hamiltonian_offset(self, energy):
@@ -514,14 +673,7 @@ class MultisetSpectraFiniteT(MultisetTdJob):
         msmps = []
         for mpdm in state.msmps:
             msmps.append(self._evolve_ground_mpdm(mpdm, evolve_dt))
-        return MultisetMps(
-            state.MsModel,
-            state.N_electron,
-            temperature=state.temperature,
-            init_model=state.init_model,
-            method=state.method,
-            msmps=msmps,
-        )
+        return self._build_multiset_state(msmps)
 
     def _evolve_ground_mpdm(self, mpdm, evolve_dt):
         mpdm = self._ensure_array_qn(mpdm)

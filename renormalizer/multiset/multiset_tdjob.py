@@ -495,9 +495,16 @@ class MultisetChargeDiffusionDynamics(MultisetTdJob):
         )
 
     def _fc_excitation(self, state: MultisetMps, alpha: int):
-        for beta in range(state.N_electron):
-            if beta != alpha:
-                state.msmps[beta].scale(1e-10, inplace=True)
+        if getattr(state, "electronic_ancilla", False):
+            for beta in range(state.N_electron):
+                if beta == alpha:
+                    continue
+                for ancilla in range(state.n_anc):
+                    state.get(beta, ancilla).scale(1e-10, inplace=True)
+        else:
+            for beta in range(state.N_electron):
+                if beta != alpha:
+                    state.msmps[beta].scale(1e-10, inplace=True)
         state.ms_normalize("mps_only")
 
     def _set_hamiltonian_offset(self, energy):
@@ -527,7 +534,7 @@ class MultisetChargeDiffusionDynamics(MultisetTdJob):
 
         logger.debug(
             f"[init] mp_norms after fc_excitation: "
-            f"{[state.msmps[a].mp_norm for a in range(self.ms_model.N_electron)]}"
+            f"{[state.msmps[a].mp_norm for a in range(min(len(state.msmps), self.ms_model.N_electron))]}"
         )
 
         self.ms_model.set_mps(state)
@@ -540,7 +547,7 @@ class MultisetChargeDiffusionDynamics(MultisetTdJob):
 
         logger.debug(
             f"[init] mp_norms after expand+normalize: "
-            f"{[self.ms_model.MsMps.msmps[a].mp_norm for a in range(self.ms_model.N_electron)]}"
+            f"{[self.ms_model.MsMps.msmps[a].mp_norm for a in range(min(len(self.ms_model.MsMps.msmps), self.ms_model.N_electron))]}"
         )
         return self.ms_model.MsMps
 

@@ -1,12 +1,12 @@
 #!/bin/bash
-#SBATCH --job-name=Holstein75_chi64
+#SBATCH --job-name=H75_M8Krylov
 #SBATCH --nodes=1
 #SBATCH --ntasks=1        # Nodes * GPUs-per-node * Ranks-per-GPU
 #SBATCH --gpus-per-node=1   # Specify the GPUs-per-node
 #SBATCH -p 4V100
 #SBATCH --qos=normal          # Depending on your needs
-#SBATCH --output=Holstein75_chi64.log
-#SBATCH --error=Holstein75_chi64.log
+#SBATCH --output=H75_M8Krylov.log
+#SBATCH --error=H75_M8Krylov.log
 
 source $HOME/.bashrc
 source /software/envs/anaconda3.env
@@ -16,7 +16,7 @@ CUPY_ACCELERATORS=cutensor
 
 conda activate reno
 export PYTHONUNBUFFERED=1
-export MAX_BONDDIM="${MAX_BONDDIM:-64}"
+export MAX_BONDDIM="${MAX_BONDDIM:-8}"
 export EVOLVE_DT="${EVOLVE_DT:-0.1}"
 export N_SNAPSHOTS="${N_SNAPSHOTS:-500}"
 export IF_STARTUP_SUBSTEPS="${IF_STARTUP_SUBSTEPS:-0}"
