@@ -23,7 +23,7 @@ from renormalizer.multiset.multiset_mps import (
     _state_expectation,
     _state_inner_product,
 )
-from renormalizer.utils import CompressConfig, CompressCriteria, EvolveConfig, Quantity
+from renormalizer.utils import CompressConfig, CompressCriteria, EvolveConfig, EvolveMethod, Quantity
 
 logger = logging.getLogger(__name__)
 
@@ -53,8 +53,9 @@ class MultisetModel:
         else:
             self.compress_config = compress_config
         self.N_electron = self.model.n_edofs
+        self.electron_index = {dof: idx for idx, dof in enumerate(self.model.e_dofs)}
         self.basis_set = [
-            item for item in self.model.basis if type(item).__name__ != "BasisSimpleElectron"
+            item for item in self.model.basis if not item.is_electron
         ]
 
         self.MsModel = [[[] for _ in range(self.N_electron)] for _ in range(self.N_electron)]
@@ -115,8 +116,8 @@ class MultisetModel:
             )
 
         if symbol1 == r"a^\dagger":
-            return dof1, dof2
-        return dof2, dof1
+            return self.electron_index[dof1], self.electron_index[dof2]
+        return self.electron_index[dof2], self.electron_index[dof1]
 
     def _reset_all_MsOp(self, op: Op):
         new_op = Op.product([op])
@@ -132,11 +133,10 @@ class MultisetModel:
             new_dofs.append(dof)
 
         if len(new_split_symbol) == 0:
-            new_op.symbol = "I"
-            new_op.split_symbol = ["I"]
-            new_op.qn_list = [np.array([0])]
-            new_op.dofs = [tuple([0, 0])]
-            return new_op
+            if len(self.basis_set) == 0:
+                raise ValueError("No vibrational basis left after removing electronic DoFs.")
+            identity_dof = self.basis_set[0].dofs[0]
+            return Op("I", identity_dof, new_op.factor, qn=0)
 
         new_op.symbol = " ".join(new_split_symbol)
         new_op.split_symbol = new_split_symbol
@@ -471,7 +471,10 @@ class MultisetModel:
         return self.MsMps
 
     def evolve_state(self, ms_mps: MultisetMps, evolve_dt, normalize=True) -> MultisetMps:
-        method = {MsEvolveMethod.ms_evolve_tdvp_ps: self._ms_evolve_tdvp_ps}[self.evolve_config.method]
+        method = {
+            MsEvolveMethod.ms_evolve_tdvp_ps: self._ms_evolve_tdvp_ps,
+            EvolveMethod.tdvp_ps: self._ms_evolve_tdvp_ps,
+        }[self.evolve_config.method]
 
         if getattr(ms_mps, "electronic_ancilla", False):
             new_msmps = ms_mps.copy()
