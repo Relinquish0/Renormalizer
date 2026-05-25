@@ -74,8 +74,7 @@ def main():
         expand=True,
         dump_dir=dump_dir,
         job_name=job_name,
-        electronic_ancilla=True,
-        electronic_purification="thermal",
+        use_electronic_ancilla=True,
     )
 
     spectra.evolve(evolve_dt=20, nsteps=5000)

@@ -66,26 +66,22 @@ class MultisetModel:
         self.ConstructMsModel()
 
         self.MsMpo = MultisetMpo(self.MsModel, self.N_electron)
-        self._active_pairs: List[Tuple[int, int]] = []
-        self._active_alpha: List[int] = []
-        self._active_beta: List[int] = []
+        self._active_pairs_index: List[Tuple[int, int]] = []
         self._active_pair_mpos: List[Mpo] = []
         self._active_pairs_by_alpha: List[List[int]] = [[] for _ in range(self.N_electron)]
+        
         self._site_group_templates = []
         self._qr_qn_plan_cache = {}
         self._reuse_environ_cache = True
         self._environ_cache = None
         self._environ_cache_token_counter = 0
-        self._refresh_mpo_cache()
+        self._active_mpo_select_grouping()
         self.MsMps = None
         if auto_init:
             logger.info(
                 "MultisetModel no longer auto-initialises MsMps. "
                 "Initial states should be prepared explicitly by a MultisetTdJob subclass."
             )
-
-        self._matvec_calls = 0
-        self._ivp_calls = 0
 
     def SplitHamTerm(self):
         for ham_term in self.model.ham_terms:
@@ -156,12 +152,12 @@ class MultisetModel:
                 init_terms.append(self._reset_all_MsOp(op))
         self.init_model = Model(basis=self.basis_set, ham_terms=init_terms)
 
-    def _refresh_mpo_cache(self):
+    def _active_mpo_select_grouping(self):
         self._environ_cache = None
         active_pairs = []
         active_pair_mpos = []
         active_pairs_by_alpha = [[] for _ in range(self.N_electron)]
-        site_group_dicts = None
+        mpo_group_dicts = None
 
         for alpha in range(self.N_electron):
             for beta in range(self.N_electron):
@@ -173,13 +169,13 @@ class MultisetModel:
                 active_pair_mpos.append(mpo)
                 active_pairs_by_alpha[alpha].append(pair_id)
 
-                if site_group_dicts is None:
-                    site_group_dicts = [dict() for _ in range(len(mpo))]
+                if mpo_group_dicts is None:
+                    mpo_group_dicts = [dict() for _ in range(len(mpo))]
 
                 for imps, local_mpo in enumerate(mpo):
                     W = asxp(local_mpo.array)
                     key = tuple(W.shape)
-                    bucket = site_group_dicts[imps].setdefault(
+                    active_mpos_group = mpo_group_dicts[imps].setdefault(
                         key,
                         {
                             "pair_ids": [],
@@ -188,41 +184,39 @@ class MultisetModel:
                             "w_tensors": [],
                         },
                     )
-                    bucket["pair_ids"].append(pair_id)
-                    bucket["alpha_idx"].append(alpha)
-                    bucket["beta_idx"].append(beta)
-                    bucket["w_tensors"].append(W)
+                    active_mpos_group["pair_ids"].append(pair_id)
+                    active_mpos_group["alpha_idx"].append(alpha)
+                    active_mpos_group["beta_idx"].append(beta)
+                    active_mpos_group["w_tensors"].append(W)
 
-        self._active_pairs = active_pairs
+        self._active_pairs_index = active_pairs
         self._active_pair_mpos = active_pair_mpos
-        self._active_alpha = [alpha for alpha, _ in active_pairs]
-        self._active_beta = [beta for _, beta in active_pairs]
         self._active_pairs_by_alpha = active_pairs_by_alpha
         self._site_group_templates = []
 
-        if site_group_dicts is None:
+        if mpo_group_dicts is None:
             return
 
-        for site_groups in site_group_dicts:
+        for site_groups in mpo_group_dicts:
             templates = []
             for key in sorted(site_groups):
-                bucket = site_groups[key]
+                active_mpos_group = site_groups[key]
                 templates.append(
                     {
-                        "pair_ids": tuple(bucket["pair_ids"]),
-                        "alpha_idx": xp.asarray(bucket["alpha_idx"], dtype=np.int64),
-                        "beta_idx": xp.asarray(bucket["beta_idx"], dtype=np.int64),
-                        "S": self._build_scatter_matrix(
-                            bucket["alpha_idx"], bucket["w_tensors"][0].real.dtype
+                        "pair_ids": tuple(active_mpos_group["pair_ids"]),
+                        "alpha_idx": xp.asarray(active_mpos_group["alpha_idx"], dtype=np.int64),
+                        "beta_idx": xp.asarray(active_mpos_group["beta_idx"], dtype=np.int64),
+                        "S": self._build_pair_to_alpha_matrix(
+                            active_mpos_group["alpha_idx"], active_mpos_group["w_tensors"][0].real.dtype
                         ),
-                        "W": xp.stack(bucket["w_tensors"]),
+                        "W": xp.stack(active_mpos_group["w_tensors"]),
                         "nsite": 1,
-                        "n_pairs": len(bucket["pair_ids"]),
+                        "n_pairs": len(active_mpos_group["pair_ids"]),
                     }
                 )
             self._site_group_templates.append(templates)
 
-    def _build_scatter_matrix(self, alpha_idx, dtype):
+    def _build_pair_to_alpha_matrix(self, alpha_idx, dtype):
         scatter = xp.zeros((self.N_electron, len(alpha_idx)), dtype=dtype)
         for i, alpha in enumerate(alpha_idx):
             scatter[alpha, i] = 1.0
@@ -231,42 +225,48 @@ class MultisetModel:
     def _invalidate_environ_cache(self):
         self._environ_cache = None
 
-    def _environ_cache_signature(self, ms_mps: MultisetMps):
+    def _has_valid_environ_cache(self, ms_mps: MultisetMps) -> bool:
+        if not self._reuse_environ_cache or self._environ_cache is None:
+            return False
         ref_mps = ms_mps.msmps[0]
         state_token = getattr(ms_mps, "_environ_cache_token", id(ms_mps))
-        return (
+        current_cache_key = (
             state_token,
-            len(self._active_pairs),
+            len(self._active_pairs_index),
             len(ref_mps),
             ref_mps.to_right,
             ref_mps.qnidx,
         )
-
-    def _has_valid_environ_cache(self, ms_mps: MultisetMps) -> bool:
-        if not self._reuse_environ_cache or self._environ_cache is None:
+        if self._environ_cache["cache_key"] != current_cache_key:
             return False
-        if self._environ_cache["signature"] != self._environ_cache_signature(ms_mps):
-            return False
-        if len(self._environ_cache["envs"]) != len(self._active_pairs):
+        if len(self._environ_cache["envs"]) != len(self._active_pairs_index):
             return False
         return True
 
     def _build_environ_list(self, ms_mps: MultisetMps, conj_mps):
         return [
             Environ(
-                ms_mps.msmps[self._active_beta[pair_id]],
+                ms_mps.msmps[self._active_pairs_index[pair_id][1]],
                 self._active_pair_mpos[pair_id],
-                mps_conj=conj_mps[self._active_alpha[pair_id]],
+                mps_conj=conj_mps[self._active_pairs_index[pair_id][0]],
             )
-            for pair_id in range(len(self._active_pairs))
+            for pair_id in range(len(self._active_pairs_index))
         ]
 
     def _get_or_build_environ_list(self, ms_mps: MultisetMps, conj_mps):
         if self._has_valid_environ_cache(ms_mps):
             return self._environ_cache["envs"]
         environ_list = self._build_environ_list(ms_mps, conj_mps)
+        ref_mps = ms_mps.msmps[0]
+        state_token = getattr(ms_mps, "_environ_cache_token", id(ms_mps))
         self._environ_cache = {
-            "signature": self._environ_cache_signature(ms_mps),
+            "cache_key": (
+                state_token,
+                len(self._active_pairs_index),
+                len(ref_mps),
+                ref_mps.to_right,
+                ref_mps.qnidx,
+            ),
             "envs": environ_list,
         }
         return environ_list
@@ -275,8 +275,16 @@ class MultisetModel:
         if not hasattr(ms_mps, "_environ_cache_token"):
             ms_mps._environ_cache_token = self._environ_cache_token_counter
             self._environ_cache_token_counter += 1
+        ref_mps = ms_mps.msmps[0]
+        state_token = getattr(ms_mps, "_environ_cache_token", id(ms_mps))
         self._environ_cache = {
-            "signature": self._environ_cache_signature(ms_mps),
+            "cache_key": (
+                state_token,
+                len(self._active_pairs_index),
+                len(ref_mps),
+                ref_mps.to_right,
+                ref_mps.qnidx,
+            ),
             "envs": environ_list,
         }
 
@@ -421,7 +429,7 @@ class MultisetModel:
             if l_tensor is None:
                 continue
             key = (l_tensor.shape[1],)
-            bucket = groups.setdefault(
+            active_mpos_group = groups.setdefault(
                 key,
                 {
                     "L": [],
@@ -430,24 +438,24 @@ class MultisetModel:
                     "beta_idx": [],
                 },
             )
-            bucket["L"].append(l_tensor)
-            bucket["R"].append(r_tensors[pair_id])
-            bucket["alpha_idx"].append(self._active_alpha[pair_id])
-            bucket["beta_idx"].append(self._active_beta[pair_id])
+            active_mpos_group["L"].append(l_tensor)
+            active_mpos_group["R"].append(r_tensors[pair_id])
+            active_mpos_group["alpha_idx"].append(self._active_pairs_index[pair_id][0])
+            active_mpos_group["beta_idx"].append(self._active_pairs_index[pair_id][1])
 
         batched_groups = []
         for key in sorted(groups):
-            bucket = groups[key]
+            active_mpos_group = groups[key]
             batched_groups.append(
                 {
-                    "L": xp.stack(bucket["L"]),
-                    "R": xp.stack(bucket["R"]),
-                    "S": self._build_scatter_matrix(bucket["alpha_idx"], bucket["L"][0].real.dtype),
+                    "L": xp.stack(active_mpos_group["L"]),
+                    "R": xp.stack(active_mpos_group["R"]),
+                    "S": self._build_pair_to_alpha_matrix(active_mpos_group["alpha_idx"], active_mpos_group["L"][0].real.dtype),
                     "W": None,
-                    "alpha_idx": xp.asarray(bucket["alpha_idx"], dtype=np.int64),
-                    "beta_idx": xp.asarray(bucket["beta_idx"], dtype=np.int64),
+                    "alpha_idx": xp.asarray(active_mpos_group["alpha_idx"], dtype=np.int64),
+                    "beta_idx": xp.asarray(active_mpos_group["beta_idx"], dtype=np.int64),
                     "nsite": 0,
-                    "n_pairs": len(bucket["alpha_idx"]),
+                    "n_pairs": len(active_mpos_group["alpha_idx"]),
                 }
             )
         return batched_groups
@@ -479,10 +487,10 @@ class MultisetModel:
         if getattr(ms_mps, "electronic_ancilla", False):
             new_msmps = ms_mps.copy()
             for ancilla in range(ms_mps.n_anc):
-                block_state = ms_mps.block_state(ancilla)
-                evolved_block = method(ms_mps_=block_state, ms_mpo=self.MsMpo, evolve_dt=evolve_dt)
+                ancilla_state = ms_mps.ancilla_set_state(ancilla)
+                evolved_ancilla_state = method(ms_mps_=ancilla_state, ms_mpo=self.MsMpo, evolve_dt=evolve_dt)
                 for alpha in range(ms_mps.N_electron):
-                    new_msmps.set(alpha, ancilla, evolved_block.msmps[alpha])
+                    new_msmps.set_electron_ancilla_state(alpha, ancilla, evolved_ancilla_state.msmps[alpha])
         else:
             new_msmps = method(ms_mps_=ms_mps, ms_mpo=self.MsMpo, evolve_dt=evolve_dt)
         if normalize:
@@ -528,7 +536,6 @@ class MultisetModel:
                 ivp_eq = lambda Y: self._apply_hop_batched(Y, batched_data, dim, shape_imps)
                 if self.evolve_config.ivp_solver == "krylov":
                     mps_t, j = expm_krylov(ivp_eq, -1j * evolve_dt / 2, Y0)
-                    self._ivp_calls += 1
 
                 mps_t = mps_t.reshape((self.N_electron,) + tuple(shape_imps))
                 local_steps.append(j)
@@ -556,12 +563,12 @@ class MultisetModel:
 
                     shapeU = list(u_batch[0].shape)
                     dimU = int(np.prod(shapeU))
-                    r_array_u = [None for _ in range(len(self._active_pairs))]
+                    r_array_u = [None for _ in range(len(self._active_pairs_index))]
                     for alpha in range(self.N_electron):
                         mps_conj_alpha = [None] * len(ms_mps.msmps[alpha])
                         mps_conj_alpha[imps] = ms_mps.msmps[alpha][imps].conj()
                         for pair_id in self._active_pairs_by_alpha[alpha]:
-                            beta = self._active_beta[pair_id]
+                            beta = self._active_pairs_index[pair_id][1]
                             r_array_u[pair_id] = Environ_list[pair_id].GetLR(
                                 "R",
                                 imps,
@@ -578,7 +585,6 @@ class MultisetModel:
                     if self.evolve_config.ivp_solver == "krylov":
                         ivp_eq_Ut = lambda Y: self._apply_hop_batched(Y, batched_u, dimU, shapeU)
                         Ut, j2 = expm_krylov(ivp_eq_Ut, 1j * evolve_dt / 2, U0)
-                        self._ivp_calls += 1
 
                     local_steps.append(j2)
                     Ut = Ut.reshape(self.N_electron, dimU)
@@ -599,12 +605,12 @@ class MultisetModel:
                     shapeC = list(vt_batch[0].shape)
                     dimC = int(np.prod(shapeC))
 
-                    l_array_c = [None for _ in range(len(self._active_pairs))]
+                    l_array_c = [None for _ in range(len(self._active_pairs_index))]
                     for alpha in range(self.N_electron):
                         mps_conj_alpha = [None] * len(ms_mps.msmps[alpha])
                         mps_conj_alpha[imps] = ms_mps.msmps[alpha][imps].conj()
                         for pair_id in self._active_pairs_by_alpha[alpha]:
-                            beta = self._active_beta[pair_id]
+                            beta = self._active_pairs_index[pair_id][1]
                             l_array_c[pair_id] = Environ_list[pair_id].GetLR(
                                 "L",
                                 imps,
@@ -620,7 +626,6 @@ class MultisetModel:
                     ivp_eq_Ct = lambda Y: self._apply_hop_batched(Y, batched_c, dimC, shapeC)
                     if self.evolve_config.ivp_solver == "krylov":
                         Ct, j2 = expm_krylov(ivp_eq_Ct, 1j * evolve_dt / 2, C0)
-                        self._ivp_calls += 1
 
                     local_steps.append(j2)
                     Ct = Ct.reshape(self.N_electron, dimC)
@@ -649,11 +654,11 @@ class MultisetModel:
             source_state = self.MsMps
             expanded_state = source_state.copy()
             for ancilla in range(source_state.n_anc):
-                block_state = source_state.block_state(ancilla)
-                self.MsMps = block_state
+                ancilla_state = source_state.ancilla_set_state(ancilla)
+                self.MsMps = ancilla_state
                 self.expand_bond_dimension_multiset(coef=coef, use_hint=use_hint)
-                for alpha in range(block_state.N_electron):
-                    expanded_state.set(alpha, ancilla, self.MsMps.msmps[alpha])
+                for alpha in range(ancilla_state.N_electron):
+                    expanded_state.set_electron_ancilla_state(alpha, ancilla, self.MsMps.msmps[alpha])
             self.MsMps = expanded_state
             return
 
@@ -684,7 +689,7 @@ class MultisetModel:
 
             cross_states = []
             for pair_id in self._active_pairs_by_alpha[alpha]:
-                beta = self._active_beta[pair_id]
+                beta = self._active_pairs_index[pair_id][1]
                 if beta == alpha:
                     continue
                 driven = self._active_pair_mpos[pair_id].apply(original_mps[beta])
@@ -715,15 +720,15 @@ class MultisetModel:
         num = 0.0
         if getattr(self.MsMps, "electronic_ancilla", False):
             for ancilla in range(self.MsMps.n_anc):
-                for pair_id, (alpha, beta) in enumerate(self._active_pairs):
+                for pair_id, (alpha, beta) in enumerate(self._active_pairs_index):
                     num += _state_expectation(
-                        self.MsMps.get(alpha, ancilla),
-                        self.MsMps.get(beta, ancilla),
+                        self.MsMps.get_electron_ancilla_state(alpha, ancilla),
+                        self.MsMps.get_electron_ancilla_state(beta, ancilla),
                         self._active_pair_mpos[pair_id],
                     )
             den = self.MsMps.total_norm()
         else:
-            for pair_id, (alpha, beta) in enumerate(self._active_pairs):
+            for pair_id, (alpha, beta) in enumerate(self._active_pairs_index):
                 num += _state_expectation(
                     self.MsMps.msmps[alpha],
                     self.MsMps.msmps[beta],
@@ -787,6 +792,4 @@ class MultisetModel:
 
             out_flat = out.reshape(n_pairs, dim)
             Y_out += xp.matmul(S, out_flat)
-
-        self._matvec_calls += 1
         return Y_out.ravel()

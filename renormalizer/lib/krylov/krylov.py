@@ -81,7 +81,7 @@ def expm_krylov(Afunc, dt, vstart: xp.ndarray, block_size=50):
 
         if 3 < j and j % 2 == 0:
             new_res = _expm_krylov(alpha[:j+1], beta[:j], V[:j+1].T, nrmv, dt)
-            if res is not None and xp.allclose(res, new_res):
+            if res is not None and xp.allclose(res, new_res,): # rtol=1e-8,atol=1e-10
                 return new_res, j+1
             else:
                 res = new_res

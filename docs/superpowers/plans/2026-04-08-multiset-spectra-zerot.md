@@ -22,7 +22,7 @@
 import numpy as np
 
 from renormalizer.model import HolsteinModel, Mol, Phonon
-from renormalizer.multiset.multisetspectra import MultisetSpectraZeroT
+from renormalizer.multiset.multiset_spectra import MultisetSpectraZeroT
 from renormalizer.utils import Quantity
 
 
@@ -90,7 +90,7 @@ pytest renormalizer/multiset/tests/test_spectra_zerot.py -v
 Expected:
 
 ```text
-E   ModuleNotFoundError: No module named 'renormalizer.multiset.multisetspectra'
+E   ModuleNotFoundError: No module named 'renormalizer.multiset.multiset_spectra'
 ```
 
 - [ ] **Step 3: Commit the failing tests**
@@ -277,14 +277,14 @@ git commit -m "feat: add multiset zero-temperature absorption spectra job"
 # -*- coding: utf-8 -*-
 
 from renormalizer.multiset.multiset_mps import MsEvolveMethod, MultisetMps
-from renormalizer.multiset.multiset_mpo import MultisetBlockMpo, MultisetMpo
+from renormalizer.multiset.multiset_mpo import MultisetMpo, MultisetMpo
 from renormalizer.multiset.multiset_model import MultisetModel
 from renormalizer.multiset.multiset_tdjob import (
     MultisetChargeDiffusionDynamics,
     MultisetTdJob,
     MultisetTransportKubo,
 )
-from renormalizer.multiset.multisetspectra import MultisetSpectraZeroT
+from renormalizer.multiset.multiset_spectra import MultisetSpectraZeroT
 ```
 
 - [ ] **Step 2: Run the new spectra tests plus the existing multiset regression tests**

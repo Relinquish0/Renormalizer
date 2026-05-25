@@ -12,7 +12,6 @@ from renormalizer.model.model import Model
 from renormalizer.mps import MpDm, Mps, ThermalProp
 from renormalizer.mps.mpo import Mpo
 from renormalizer.multiset.multiset_model import MultisetModel
-from renormalizer.multiset.multiset_mpo import MultisetBlockMpo
 from renormalizer.multiset.multiset_mps import MsEvolveMethod, MultisetMps
 from renormalizer.utils import (
     CompressConfig,
@@ -363,7 +362,6 @@ class MultisetChargeDiffusionDynamics(MultisetTdJob):
         method: str = "thermo_field",
         evolve_config: EvolveConfig = None,
         compress_config: CompressConfig = None,
-        ms_model: MultisetModel = None,
         initial_site: int = None,
         stop_at_edge: bool = True,
         edge_threshold: float = 1e-4,
@@ -375,25 +373,18 @@ class MultisetChargeDiffusionDynamics(MultisetTdJob):
         startup_substeps_n: int = 10,
         observables: dict = None,
     ):
-        if ms_model is None:
-            if model is None or max_bonddim is None:
-                raise ValueError("Either provide `ms_model` or both `model` and `max_bonddim`.")
-            ms_model = MultisetModel(
-                model,
-                max_bonddim=max_bonddim,
-                temperature=temperature,
-                method=method,
-                evolve_config=evolve_config,
-                compress_config=compress_config,
-                auto_init=False,
-            )
-        else:
-            if evolve_config is not None:
-                ms_model.evolve_config = evolve_config
-            if compress_config is not None:
-                ms_model.compress_config = compress_config
+        if model is None or max_bonddim is None:
+            raise ValueError("Both `model` and `max_bonddim` are required.")
 
-        self.ms_model = ms_model
+        self.ms_model = MultisetModel(
+            model,
+            max_bonddim=max_bonddim,
+            temperature=temperature,
+            method=method,
+            evolve_config=evolve_config,
+            compress_config=compress_config,
+            auto_init=False,
+        )
         self.temperature = self.ms_model.temperature
         self.initial_site = self.ms_model.N_electron // 2 if initial_site is None else initial_site
         self.stop_at_edge = stop_at_edge
@@ -500,7 +491,7 @@ class MultisetChargeDiffusionDynamics(MultisetTdJob):
                 if beta == alpha:
                     continue
                 for ancilla in range(state.n_anc):
-                    state.get(beta, ancilla).scale(1e-10, inplace=True)
+                    state.get_electron_ancilla_state(beta, ancilla).scale(1e-10, inplace=True)
         else:
             for beta in range(state.N_electron):
                 if beta != alpha:
@@ -526,7 +517,7 @@ class MultisetChargeDiffusionDynamics(MultisetTdJob):
                         terms=None,
                         offset=Quantity(0),
                     )
-        self.ms_model._refresh_mpo_cache()
+        self.ms_model._active_mpo_select_grouping()
 
     def init_mps(self):
         state = self._init_msmps(self.init_mp())

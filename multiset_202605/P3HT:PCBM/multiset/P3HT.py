@@ -19,8 +19,8 @@ J_LE = 100.0
 T_CS = -120.0
 LAMBDA_LE1_CS1 = -200.0
 W_R = 10.0
-G_R_DIAG = 10.0 / np.sqrt(2.0)
-G_R_OFFDIAG = 30.0 / np.sqrt(2.0)
+G_R_DIAG = 30.0 / np.sqrt(2.0)
+G_R_OFFDIAG = -10.0 / np.sqrt(2.0)
 
 EPS_CS = np.array([0.0, 33.6, 47.4, 56.0, 61.8, 65.7, 68.4, 70.0, 70.9, 71.2, 71.1, 70.5, 69.5])
 W_F = np.array([200.025, 184.269, 177.853, 141.11, 93.952, 79.933, 55.892, 33.264])
@@ -104,7 +104,7 @@ class P3HTPCBMModel(Model):
         self.mol_num = len(self.state_labels)
 
 
-def run(job_name="p3ht_multiset", max_bond_dim=32, dt_fs=1.0, total_fs=200.0):
+def run(job_name="p3ht_multiset", max_bond_dim=64, dt_fs=1.0, total_fs=200.0):
     model = P3HTPCBMModel()
     evolve_config = EvolveConfig(EvolveMethod.tdvp_ps, guess_dt=Quantity(dt_fs, "fs").as_au())
     job = MultisetChargeDiffusionDynamics(
@@ -115,7 +115,7 @@ def run(job_name="p3ht_multiset", max_bond_dim=32, dt_fs=1.0, total_fs=200.0):
         initial_site=0,
         stop_at_edge=False,
         dump_dir=str(Path(__file__).parent),
-        job_name=job_name,
+        job_name=job_name + "_" + str(max_bond_dim),
         observables={"ph_occupations": False},
     )
     nsteps = int(round(total_fs / dt_fs))

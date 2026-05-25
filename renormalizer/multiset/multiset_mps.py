@@ -223,7 +223,7 @@ class ElectronicAncillaMultisetMps(MultisetMps):
     def __init__(
         self,
         msmodel,
-        n_phys: int,
+        n_electron: int,
         temperature: Quantity = Quantity(0, "K"),
         init_model: Model = None,
         method: str = "thermo_field",
@@ -238,9 +238,8 @@ class ElectronicAncillaMultisetMps(MultisetMps):
 
         self.MsModel = msmodel
         self.msmodel = msmodel
-        self.N_electron = n_phys
-        self.n_phys = n_phys
-        self.n_anc = self.n_phys if n_anc is None else int(n_anc)
+        self.N_electron = n_electron
+        self.n_anc = self.N_electron if n_anc is None else int(n_anc)
         if self.n_anc <= 0:
             raise ValueError(f"`n_anc` should be positive. Got {self.n_anc}.")
         self.electronic_ancilla = True
@@ -249,7 +248,7 @@ class ElectronicAncillaMultisetMps(MultisetMps):
         self.method = method
         self.msmps = []
 
-        state_count = self.n_phys * self.n_anc
+        state_count = self.N_electron * self.n_anc
         if msmps is not None:
             if len(msmps) != state_count:
                 raise ValueError(f"`msmps` should contain {state_count} states. Got {len(msmps)}.")
@@ -257,36 +256,36 @@ class ElectronicAncillaMultisetMps(MultisetMps):
         else:
             self.msmps = [init_mp.copy() for _ in range(state_count)]
 
-    def _flat_index(self, alpha: int, ancilla: int = 0) -> int:
-        if not (0 <= alpha < self.n_phys):
+    def _check_index(self, alpha: int, ancilla: int = 0) -> int:
+        if not (0 <= alpha < self.N_electron):
             raise IndexError(f"Physical electron index out of range: {alpha}")
         if not (0 <= ancilla < self.n_anc):
             raise IndexError(f"Electronic ancilla index out of range: {ancilla}")
         return alpha * self.n_anc + ancilla
 
-    def get(self, alpha: int, ancilla: int = 0):
-        return self.msmps[self._flat_index(alpha, ancilla)]
+    def get_electron_ancilla_state(self, alpha: int, ancilla: int = 0):
+        return self.msmps[self._check_index(alpha, ancilla)]
 
-    def set(self, alpha: int, ancilla: int, mps):
-        self.msmps[self._flat_index(alpha, ancilla)] = mps
+    def set_electron_ancilla_state(self, alpha: int, ancilla: int, mps):
+        self.msmps[self._check_index(alpha, ancilla)] = mps
 
-    def block(self, ancilla: int):
-        return [self.get(alpha, ancilla) for alpha in range(self.n_phys)]
+    def ancilla_set(self, ancilla: int):
+        return [self.get_electron_ancilla_state(alpha, ancilla) for alpha in range(self.N_electron)]
 
-    def block_state(self, ancilla: int) -> MultisetMps:
+    def ancilla_set_state(self, ancilla: int) -> MultisetMps:
         return MultisetMps(
             self.MsModel,
-            self.n_phys,
+            self.N_electron,
             temperature=self.temperature,
             init_model=self.init_model,
             method=self.method,
-            msmps=self.block(ancilla),
+            msmps=self.ancilla_set(ancilla),
         )
 
     def copy(self) -> "ElectronicAncillaMultisetMps":
         return ElectronicAncillaMultisetMps(
             self.MsModel,
-            self.n_phys,
+            self.N_electron,
             temperature=self.temperature,
             init_model=self.init_model,
             method=self.method,
@@ -297,7 +296,7 @@ class ElectronicAncillaMultisetMps(MultisetMps):
     def to_complex(self) -> "ElectronicAncillaMultisetMps":
         return ElectronicAncillaMultisetMps(
             self.MsModel,
-            self.n_phys,
+            self.N_electron,
             temperature=self.temperature,
             init_model=self.init_model,
             method=self.method,
@@ -320,22 +319,22 @@ class ElectronicAncillaMultisetMps(MultisetMps):
         raise ValueError(f"kind={kind} is not valid.")
 
     def rho_el(self):
-        rho = np.zeros((self.n_phys, self.n_phys), dtype=np.complex128)
-        for alpha in range(self.n_phys):
-            for beta in range(self.n_phys):
+        rho = np.zeros((self.N_electron, self.N_electron), dtype=np.complex128)
+        for alpha in range(self.N_electron):
+            for beta in range(self.N_electron):
                 total = 0j
                 for ancilla in range(self.n_anc):
-                    total += _state_inner_product(self.get(alpha, ancilla), self.get(beta, ancilla))
+                    total += _state_inner_product(self.get_electron_ancilla_state(alpha, ancilla), self.get_electron_ancilla_state(beta, ancilla))
                 rho[alpha, beta] = total
         return rho
 
     @property
     def e_occupations_multiset(self):
-        occupations = np.empty(self.n_phys, dtype=np.float64)
-        for alpha in range(self.n_phys):
+        occupations = np.empty(self.N_electron, dtype=np.float64)
+        for alpha in range(self.N_electron):
             total = 0j
             for ancilla in range(self.n_anc):
-                total += _state_inner_product(self.get(alpha, ancilla), self.get(alpha, ancilla))
+                total += _state_inner_product(self.get_electron_ancilla_state(alpha, ancilla), self.get_electron_ancilla_state(alpha, ancilla))
             occupations[alpha] = total.real
         return occupations
 
@@ -400,7 +399,7 @@ class ElectronicAncillaMultisetMps(MultisetMps):
         method = method.item() if hasattr(method, "item") else str(method)
         return cls(
             msmodel=msmodel,
-            n_phys=N_electron,
+            n_electron=N_electron,
             temperature=temperature,
             init_model=msmodel[0][0] if init_model is None else init_model,
             method=method,
