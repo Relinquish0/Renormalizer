@@ -1,13 +1,13 @@
 #!/bin/bash
-#SBATCH --job-name=P3HT_ttn_s64
+#SBATCH --job-name=P3HT_ttn_s32
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --gpus-per-node=1
 #SBATCH --mem=1024G
 #SBATCH -p 4V100
 #SBATCH --qos=normal
-#SBATCH --output=P3HT_ttn_s64.log
-#SBATCH --error=P3HT_ttn_s64.log
+#SBATCH --output=P3HT_ttn_s32.log
+#SBATCH --error=P3HT_ttn_s32.log
 
 source $HOME/.bashrc
 source /software/envs/anaconda3.env
@@ -18,7 +18,7 @@ export CUPY_ACCELERATORS=cutensor
 conda activate reno
 export PYTHONUNBUFFERED=1
 export JOB_NAME="${JOB_NAME:-p3ht_ttns}"
-export MAX_BONDDIM="${MAX_BONDDIM:-64}"
+export MAX_BONDDIM="${MAX_BONDDIM:-32}"
 export DT_FS="${DT_FS:-1.0}"
 export TOTAL_FS="${TOTAL_FS:-200.0}"
 

@@ -5,7 +5,11 @@ from pathlib import Path
 
 import numpy as np
 
+import renormalizer.lib as reno_lib
+import renormalizer.tn.time_evolution as tn_time_evolution
+from renormalizer.lib.krylov.krylov import _expm_krylov as _project_krylov
 from renormalizer.model import Op
+from renormalizer.mps.backend import USE_GPU, xp
 from renormalizer.mps.mps import expand_bond_dimension_general
 from renormalizer.tn import BasisTree, TTNO, TTNS
 from renormalizer.utils import CompressConfig, CompressCriteria, EvolveConfig, EvolveMethod, Quantity
@@ -14,6 +18,61 @@ from renormalizer.utils import CompressConfig, CompressCriteria, EvolveConfig, E
 logging.basicConfig(level=logging.INFO, format="%(asctime)s[%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
+
+KRYLOV_ALLCLOSE_RTOL = float(os.environ.get("KRYLOV_ALLCLOSE_RTOL", "1e-8"))
+KRYLOV_ALLCLOSE_ATOL = float(os.environ.get("KRYLOV_ALLCLOSE_ATOL", "1e-10"))
+
+
+def _expm_krylov_strict_allclose(Afunc, dt, vstart, block_size=50):
+    if not np.iscomplex(dt):
+        dt = dt.real
+
+    vstart = xp.asarray(vstart)
+    nrmv = float(xp.linalg.norm(vstart))
+    assert nrmv > 0
+    vstart = vstart / nrmv
+
+    alpha = np.zeros(block_size)
+    beta = np.zeros(block_size - 1)
+
+    V = xp.empty((block_size, len(vstart)), dtype=vstart.dtype)
+    V[0] = vstart
+    res = None
+
+    for j in range(len(vstart)):
+        w = Afunc(V[j])
+        alpha[j] = xp.vdot(w, V[j]).real
+
+        if j == len(vstart) - 1:
+            return _project_krylov(alpha[:j + 1], beta[:j], V[:j + 1, :].T, nrmv, dt), j + 1
+
+        if len(V) == j + 1:
+            V, old_V = xp.empty((len(V) + block_size, len(vstart)), dtype=vstart.dtype), V
+            V[:len(old_V)] = old_V
+            del old_V
+            alpha = np.concatenate([alpha, np.zeros(block_size)])
+            beta = np.concatenate([beta, np.zeros(block_size)])
+
+        w -= alpha[j] * V[j] + (beta[j - 1] * V[j - 1] if j > 0 else 0)
+        beta[j] = xp.linalg.norm(w)
+        if beta[j] < 100 * len(vstart) * np.finfo(float).eps:
+            return _project_krylov(alpha[:j + 1], beta[:j], V[:j + 1, :].T, nrmv, dt), j + 1
+
+        if 3 < j and j % 2 == 0:
+            new_res = _project_krylov(alpha[:j + 1], beta[:j], V[:j + 1].T, nrmv, dt)
+            if res is not None and xp.allclose(
+                res,
+                new_res,
+                rtol=KRYLOV_ALLCLOSE_RTOL,
+                atol=KRYLOV_ALLCLOSE_ATOL,
+            ):
+                return new_res, j + 1
+            res = new_res
+        V[j + 1] = w / beta[j]
+
+
+reno_lib.expm_krylov = _expm_krylov_strict_allclose
+tn_time_evolution.expm_krylov = _expm_krylov_strict_allclose
 
 MODEL_PATH = Path(__file__).resolve().parents[3] / "multiset_202605/P3HT:PCBM/multiset/P3HT.py"
 
@@ -30,6 +89,13 @@ P3HTPCBMModel = model_module.P3HTPCBMModel
 
 
 def run(job_name="p3ht_ttns", max_bond_dim=32, dt_fs=1.0, total_fs=200.0):
+    logger.info("GPU enabled: %s", USE_GPU)
+    logger.info("Backend: %s", "CuPy" if USE_GPU else "NumPy")
+    logger.info(
+        "strict Krylov allclose enabled: rtol=%s, atol=%s",
+        KRYLOV_ALLCLOSE_RTOL,
+        KRYLOV_ALLCLOSE_ATOL,
+    )
     model = P3HTPCBMModel()
     basis_tree = BasisTree.binary_mctdh(model.basis, contract_primitive=True)
     ttno = TTNO(basis_tree, model.ham_terms)
