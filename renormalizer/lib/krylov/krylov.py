@@ -17,7 +17,8 @@ def _expm_krylov(alpha, beta, V, v_norm, dt):
     try:
         w_hess, u_hess = eigh_tridiagonal(alpha, beta)
     except np.linalg.LinAlgError:
-        logger.warning(f"tridiagonal diagonalization failed, size:{len(alpha)}")
+        logger.warning(f"Tridiagonal diagonalization in Krylov solver failed, size:{len(alpha)}. "
+                       f"Usually this means: (1) Unphysical Hamiltonian OR (2) large step size.")
         h = np.diag(alpha) + np.diag(beta, k=-1) + np.diag(beta, k=1)
         w_hess, u_hess = np.linalg.eigh(h)
 
@@ -58,14 +59,14 @@ def expm_krylov(Afunc, dt, vstart: xp.ndarray, block_size=50):
 
 
     for j in range(len(vstart)):
-        
+
         w = Afunc(V[j])
         alpha[j] = xp.vdot(w, V[j]).real
 
         if j == len(vstart)-1:
             #logger.debug("the krylov subspace is equal to the full space")
             return _expm_krylov(alpha[:j+1], beta[:j], V[:j+1, :].T, nrmv, dt), j+1
-        
+
         if len(V) == j+1:
             V, old_V = xp.empty((len(V) + block_size, len(vstart)), dtype=vstart.dtype), V
             V[:len(old_V)] = old_V
@@ -81,10 +82,9 @@ def expm_krylov(Afunc, dt, vstart: xp.ndarray, block_size=50):
 
         if 3 < j and j % 2 == 0:
             new_res = _expm_krylov(alpha[:j+1], beta[:j], V[:j+1].T, nrmv, dt)
-            if res is not None and xp.allclose(res, new_res,): # rtol=1e-8,atol=1e-10
+            if res is not None and xp.allclose(res, new_res, rtol=1e-8, atol=1e-10): 
+                # Default rtol=1e-5, atol=1e-8. Lower tolerance provides higher precision, but requires more memory.
                 return new_res, j+1
             else:
                 res = new_res
         V[j + 1] = w / beta[j]
-
-
