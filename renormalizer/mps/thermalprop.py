@@ -66,7 +66,7 @@ class ThermalProp(TdMpsJob):
 
     def init_mps(self):
         self.init_mpdm.evolve_config = self.evolve_config
-        if self.evolve_config.is_tdvp and self.auto_expand:
+        if self.evolve_config.is_tdvp and self.auto_expand and getattr(self.evolve_config, "expansion_method", "krylov") == "krylov":
             self.init_mpdm = self.init_mpdm.expand_bond_dimension(self.h_mpo)
         return self.init_mpdm
 

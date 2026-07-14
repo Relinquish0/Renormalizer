@@ -1,14 +1,14 @@
 #!/bin/bash
-#SBATCH --job-name=fmo_chi32
+#SBATCH --job-name=fmo_m256
 #SBATCH --nodes=1
 #SBATCH --ntasks=1        # Nodes * GPUs-per-node * Ranks-per-GPU
 #SBATCH --gpus-per-node=1   # Specify the GPUs-per-node
 #SBATCH -p 4A100,4V100
 #SBATCH --qos=normal          # Depending on your needs
-#SBATCH --output=fmo_chi32.log
-#SBATCH --error=fmo_chi32.log
+#SBATCH --output=fmo_m256.log
+#SBATCH --error=fmo_m256.log
 
-export MAX_BONDDIM=32
+export MAX_BONDDIM=256
 export EVOLVE_DT=160
 export EVOLVE_TIME=40000
 

@@ -1,13 +1,13 @@
 #!/bin/bash
-#SBATCH --job-name=P3HT_m128
+#SBATCH --job-name=P3HT_m16
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --gpus-per-node=1
 #SBATCH --mem=128G
 #SBATCH -p 4A100
 #SBATCH --qos=normal
-#SBATCH --output=P3HT_m128.log
-#SBATCH --error=P3HT_m128.log
+#SBATCH --output=P3HT_m16.log
+#SBATCH --error=P3HT_m16.log
 
 source $HOME/.bashrc
 source /software/envs/anaconda3.env
@@ -18,7 +18,7 @@ export CUPY_ACCELERATORS=cutensor
 conda activate reno
 export PYTHONUNBUFFERED=1
 export JOB_NAME="${JOB_NAME:-p3ht_multiset}"
-export MAX_BONDDIM="${MAX_BONDDIM:-128}"
+export MAX_BONDDIM="${MAX_BONDDIM:-16}"
 export DT_FS="${DT_FS:-1.0}"
 export TOTAL_FS="${TOTAL_FS:-200.0}"
 

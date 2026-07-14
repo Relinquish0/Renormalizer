@@ -1,12 +1,12 @@
 #!/bin/bash
-#SBATCH --job-name=fmo_16bd_ancilla
+#SBATCH --job-name=fmo_64bd_thermo
 #SBATCH --nodes=1
 #SBATCH --ntasks=1        # Nodes * GPUs-per-node * Ranks-per-GPU
 #SBATCH --gpus-per-node=1   # Specify the GPUs-per-node
 #SBATCH -p 4A100,4V100
 #SBATCH --qos=normal          # Depending on your needs
-#SBATCH --output=fmo_16bd_ancilla.log
-#SBATCH --error=fmo_16bd_ancilla.log
+#SBATCH --output=fmo_64bd_thermo.log
+#SBATCH --error=fmo_64bd_thermo.log
 
 source $HOME/.bashrc
 source /software/envs/anaconda3.env

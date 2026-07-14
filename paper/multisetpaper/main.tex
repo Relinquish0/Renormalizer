@@ -1,0 +1,408 @@
+% Main manuscript draft.
+% Compile with LaTeX -> BibTeX -> LaTeX -> LaTeX when references are used.
+
+\documentclass[journal=jctcce,manuscript=article]{achemso}
+
+\setkeys{acs}{maxauthors=0}
+\SectionNumbersOn
+
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{amsfonts}
+\usepackage{bm}
+\usepackage{braket}
+\usepackage{booktabs}
+\usepackage{chemformula}
+\usepackage{dcolumn}
+\usepackage{graphicx}
+\usepackage[hidelinks]{hyperref}
+\usepackage{multirow}
+\usepackage{physics}
+\usepackage{tabularx}
+\usepackage{threeparttable}
+\usepackage{xcolor}
+\usepackage{xurl}
+
+\newcommand{\placeholder}[1]{\textcolor{red}{#1}}
+\newcommand{\rev}[1]{\textcolor{black}{#1}}
+\newcommand{\figureplaceholder}[2]{%
+\begin{figure}[htbp]
+    \centering
+    \fbox{%
+    \begin{minipage}[c][0.24\textheight][c]{0.82\textwidth}
+        \centering
+        \textbf{Figure dummy: #1}\\[0.5em]
+        \placeholder{#2}
+    \end{minipage}}
+    \caption{#2}
+    \label{fig:#1}
+\end{figure}}
+
+\title{GPU-Accelerated Multiset Tensor Networks for Finite-Temperature Exciton Dynamics and Spectra}
+
+\author{First Author}
+\email{email@example.com}
+\affiliation{Department, Institution, City, Postal Code, Country}
+
+\author{Second Author}
+\affiliation{Department, Institution, City, Postal Code, Country}
+
+\keywords{multiset matrix product state, GPU acceleration, finite-temperature exciton dynamics, optical spectra, electron-phonon coupling}
+
+\begin{document}
+
+\begin{abstract}
+Finite-temperature simulations of exciton dynamics and optical spectra require wavefunction representations that can follow electronic population transfer, mode-specific nuclear reorganization, and thermal broadening in the same calculation. A singleset tensor network represents all electronic states and their nuclear environments in one shared network, which can be inefficient when different electronic states develop distinct nuclear wavepackets. Here we present a GPU-accelerated multiset tensor-network framework implemented in Renormalizer for exciton-phonon Hamiltonians. The method represents each electronic state with an independent conditional nuclear matrix product state or tree tensor network state, constructs the corresponding multiset matrix product operator, and propagates the coupled components with a projector-splitting time-dependent variational principle algorithm. The same framework supports finite-temperature product or purified phonon initial states, optical correlation functions, electronic ancilla purification when the electronic subsystem is thermally mixed, adaptive initial bond-dimension expansion, and CuPy-backed GPU execution. We benchmark the implementation on one- and two-dimensional Holstein models, finite-temperature Fenna-Matthews-Olson exciton dynamics, perylene bisimide absorption and emission spectra, and the P3HT:PCBM exciton-dissociation model. \placeholder{Insert final quantitative comparisons for bond dimensions, population errors, spectral deviations, and GPU wall-time or memory once production figures are fixed.} These tests position multiset tensor networks as a reusable methods framework for finite-temperature exciton dynamics and spectra, with clear boundaries set by electron-phonon coupling strength, electronic coupling range, temperature, and tensor-network topology.
+\end{abstract}
+
+\maketitle
+
+\section{Introduction}
+
+Exciton dynamics and optical spectra in molecular aggregates and organic semiconductor interfaces are governed by the coupled motion of electronic excitation and molecular vibrations. The same electron-phonon coupling that drives energy transfer, charge separation, and spectral line shapes also produces high-dimensional quantum dynamics that are difficult to approximate uniformly. Reliable simulations must therefore treat electronic delocalization, nuclear reorganization, and finite-temperature effects within a controlled many-body representation.
+
+Tensor-network methods provide systematically improvable tools for this task. Matrix product states (MPSs) compress the many-mode wavefunction into a one-dimensional tensor train, while tree tensor network states (TTNSs) generalize the same idea to non-chain topologies. These representations have been used for time-dependent density matrix renormalization group simulations of molecular spectra, exciton transport, and benchmark comparisons between MPS and TTNS calculations. \placeholder{Add citations to TD-DMRG spectra, ML-MCTDH, Renormalizer, pyTTN, and the recent P3HT:PCBM MPS/TTNS comparison.}
+
+A central representational choice is whether all electronic states should share one nuclear tensor network. In a singleset ansatz, a single tensor network encodes the electronic index and all nuclear coordinates together. In a multiset ansatz, the total state is expanded over electronic states, and each electronic state carries its own conditional nuclear wavepacket. This idea follows the multiset MCTDH tradition and was introduced into MPS calculations by Kloss, Reichman, and Tempelaar for strong Holstein-type coupling, where mobile Franck-Condon excitations generate electronic-state-dependent nuclear distortions.\cite{PhysRevLett.123.126601}
+
+The present work develops this idea into a methods framework for finite-temperature exciton dynamics and spectra. The implementation in Renormalizer includes multiset MPSs, multiset matrix product operators (MPOs), projector-splitting TDVP propagation, finite-temperature initialization, optical spectra, electronic ancilla purification, multiset TTNS propagation, initial bond expansion, and GPU execution through a NumPy/CuPy backend. We validate the framework with Holstein benchmarks, finite-temperature FMO dynamics, PBI spectra, and P3HT:PCBM exciton dissociation. The Results first ask when the multiset representation is advantageous across electron-phonon coupling strength, long-range electronic coupling, and temperature; the later sections then demonstrate spectra, electronic ancilla, TTNS extension, and practical computational boundaries.
+
+\section{Theory and Computational Framework}
+
+
+\subsection{MPS and Multiset MPS Ansatz}
+
+We first fix the tensor-network notation used throughout this work. Consider a quantum state defined on \(L\) degrees of freedom with local basis states \(\{\ket{\sigma_i}\}\), where \(\sigma_i=1,\ldots,d_i\) labels the physical index of site \(i\). The full coefficient tensor,
+\begin{equation}
+    \ket{\Psi(t)} = \sum_{\sigma_1\cdots\sigma_L}
+    C_{\sigma_1\cdots\sigma_L}(t)\ket{\sigma_1\cdots\sigma_L},
+    \label{eq:full-mps-state}
+\end{equation}
+contains \(\prod_i d_i\) amplitudes and is therefore exponentially large in the number of degrees of freedom. A matrix product state (MPS) approximates this high-order tensor by a contraction of low-order tensors,
+\begin{equation}
+    C_{\sigma_1\cdots\sigma_L}(t) \approx
+    \sum_{a_1\cdots a_{L-1}}
+    A^{[1]\sigma_1}_{1a_1}(t)
+    A^{[2]\sigma_2}_{a_1a_2}(t)
+    \cdots
+    A^{[L]\sigma_L}_{a_{L-1}1}(t),
+    \label{eq:generic-mps}
+\end{equation}
+where \(A^{[i]\sigma_i}\) is a matrix associated with site \(i\). The indices \(\sigma_i\) are physical indices, while \(a_i=1,\ldots,M_i\) are virtual or bond indices connecting neighboring tensors. The boundary dimensions are \(M_0=M_L=1\), and the maximum \(M=\max_i M_i\) is referred to as the bond dimension. \placeholder{Cite the MPS definition in Yang et al. 2025 Section 2.3 and the MPS/TTNS notation in Li et al. 2026 Section 2.2.}
+
+The numerical role of the bond dimension is to control how much correlation can pass through a virtual bond. If the MPS is brought into a canonical form with the orthogonality center placed at a given bond, the state admits a local Schmidt decomposition across that bipartition. Truncating the MPS corresponds to discarding small singular values in this decomposition. Thus, increasing \(M\) systematically improves the representational space, while the computational storage changes from an exponentially large coefficient tensor to approximately
+\begin{equation}
+    N_{\mathrm{par}}^{\mathrm{MPS}} \sim \sum_{i=1}^{L} d_i M_{i-1}M_i,
+    \label{eq:mps-param-count}
+\end{equation}
+up to boundary and symmetry reductions. The accuracy and cost of an MPS are therefore determined not only by \(M\), but also by the site ordering, because a different ordering changes which physical degrees of freedom are separated by each virtual bond.
+
+For an exciton-phonon wavefunction, the physical indices consist of one electronic index and a set of nuclear indices. In a singleset MPS, the electronic degree of freedom is included as one site in the same tensor train as the nuclear modes. With the electronic basis \(\ket{\alpha}\) and nuclear occupation basis \(\ket{n_1\cdots n_f}\), the exact wavefunction is
+\begin{equation}
+    \ket{\Psi(t)} = \sum_{\alpha,n_1\cdots n_f}
+    C_{\alpha,n_1\cdots n_f}(t)\ket{\alpha}\ket{n_1\cdots n_f},
+    \label{eq:full-state}
+\end{equation}
+and the singleset MPS representation is
+\begin{equation}
+    C_{\alpha,n_1\cdots n_f}(t) \approx
+    \sum_{a_0\cdots a_{f-1}}
+    A^{[0]\alpha}_{1a_0}(t)
+    A^{[1]n_1}_{a_0a_1}(t)
+    \cdots
+    A^{[f]n_f}_{a_{f-1}1}(t).
+    \label{eq:singleset-mps}
+\end{equation}
+This ansatz uses one chain to represent both the electronic distribution and all nuclear wavepackets. It is compact when one shared tensor train can efficiently encode the nuclear states associated with all electronic configurations.
+
+The multiset MPS ansatz changes the numerical structure while preserving the same total Hilbert space. Instead of placing the electronic index inside a single tensor train, the total wavefunction is expanded explicitly in the electronic basis,
+\begin{equation}
+    \ket{\Psi_{\mathrm{ms}}(t)}=
+    \sum_{\alpha=1}^{N_{\mathrm e}}\ket{\alpha}\otimes\ket{\psi_{\alpha}(t)}.
+    \label{eq:multiset-ansatz}
+\end{equation}
+Each \(\ket{\psi_{\alpha}(t)}\) is an independent nuclear MPS,
+\begin{equation}
+    \ket{\psi_{\alpha}(t)} = \sum_{n_1\cdots n_f}
+    \sum_{a^{(\alpha)}_1\cdots a^{(\alpha)}_{f-1}}
+    A_{\alpha}^{[1]n_1}(t)_{1a^{(\alpha)}_1}
+    A_{\alpha}^{[2]n_2}(t)_{a^{(\alpha)}_1a^{(\alpha)}_2}
+    \cdots
+    A_{\alpha}^{[f]n_f}(t)_{a^{(\alpha)}_{f-1}1}
+    \ket{n_1\cdots n_f}.
+    \label{eq:component-mps}
+\end{equation}
+Equations~\ref{eq:multiset-ansatz} and \ref{eq:component-mps} should be read together: the individual component MPSs are not separate physical simulations, and no single component is the full state. The complete wavefunction is obtained only after summing all electronic components in Eq.~\ref{eq:multiset-ansatz}. Equivalently, the full coefficient tensor is represented as
+\begin{equation}
+    C^{\mathrm{ms}}_{\alpha,n_1\cdots n_f}(t)=
+    \sum_{a^{(\alpha)}_1\cdots a^{(\alpha)}_{f-1}}
+    A_{\alpha}^{[1]n_1}(t)_{1a^{(\alpha)}_1}
+    A_{\alpha}^{[2]n_2}(t)_{a^{(\alpha)}_1a^{(\alpha)}_2}
+    \cdots
+    A_{\alpha}^{[f]n_f}(t)_{a^{(\alpha)}_{f-1}1},
+    \label{eq:multiset-coefficient}
+\end{equation}
+for each electronic state \(\alpha\), followed by the electronic-basis sum in Eq.~\ref{eq:multiset-ansatz}.
+
+The distinction between singleset and multiset MPS is therefore a distinction in tensor-network factorization, not in the underlying physical wavefunction. A singleset MPS stores \(C_{\alpha,n_1\cdots n_f}\) in one tensor train with a shared set of virtual bonds. A multiset MPS stores the same electronic blocks as \(N_{\mathrm e}\) separate nuclear tensor trains, each with its own tensors, virtual bonds, canonical center, and bond dimensions. The electronic components are coupled by the Hamiltonian blocks introduced in the next subsection, but their nuclear wavepacket shapes are represented independently. This structure is useful when different electronic states require different nuclear tensor-network representations, while it increases the number of component MPSs that must be propagated.
+
+Because the electronic basis is orthonormal, the norm and electronic reduced density matrix follow directly from overlaps between component MPSs,
+\begin{equation}
+    \braket{\Psi_{\mathrm{ms}}|\Psi_{\mathrm{ms}}} =
+    \sum_{\alpha}\braket{\psi_{\alpha}|\psi_{\alpha}},
+    \qquad
+    \rho^{\mathrm e}_{\alpha\beta}(t)=\braket{\psi_{\beta}(t)|\psi_{\alpha}(t)}.
+    \label{eq:rhoel-pop}
+\end{equation}
+The electronic population is \(P_{\alpha}(t)=\rho^{\mathrm e}_{\alpha\alpha}(t)\). These relations provide the link between the numerical multiset data structure and the observables used in the benchmark calculations.
+
+\figureplaceholder{mps-multiset-ansatz}{MPS and multiset MPS ansatz. The final figure should show (a) a generic MPS with physical indices \(\sigma_i\) and virtual indices \(a_i\), (b) a singleset exciton-phonon MPS where the electronic index is one physical site in a shared chain, and (c) a multiset MPS where each electronic state \(\alpha\) carries an independent nuclear MPS and the full wavefunction is their electronic-state sum.}
+
+\subsection{Multiset Matrix Product Operator}
+
+The Hamiltonians considered here have the electronic block form
+\begin{equation}
+    \hat H = \sum_{\alpha,\beta=1}^{N_{\mathrm e}}\ket{\alpha}\bra{\beta}\otimes \hat h_{\alpha\beta},
+    \label{eq:block-hamiltonian}
+\end{equation}
+where \(\hat h_{\alpha\beta}\) acts on the nuclear Hilbert space. For a Holstein-type model, a representative block is
+\begin{equation}
+    \hat h_{\alpha\beta}=\delta_{\alpha\beta}
+    \left(E_{\alpha}+\sum_j\omega_j\hat b_j^{\dagger}\hat b_j+
+    \sum_j g_{\alpha j}\omega_j(\hat b_j^{\dagger}+\hat b_j)\right)+J_{\alpha\beta},
+    \label{eq:holstein-block}
+\end{equation}
+where \(E_{\alpha}\) is a diabatic energy, \(\omega_j\) is a mode frequency, \(g_{\alpha j}\) is a state-dependent displacement, and \(J_{\alpha\beta}\) is an electronic coupling.
+
+Renormalizer constructs a multiset MPO by converting each nonzero nuclear block \(\hat h_{\alpha\beta}\) into a conventional MPO,
+\begin{equation}
+    \mathcal H_{\mathrm{ms}} = \left\{\hat H^{\mathrm{MPO}}_{\alpha\beta}\right\}_{\alpha,\beta=1}^{N_{\mathrm e}}.
+    \label{eq:multiset-mpo}
+\end{equation}
+The diagonal blocks propagate each conditional nuclear wavepacket on its own electronic surface, while the off-diagonal blocks transfer amplitude between electronic components. This block representation is the computational object used by the multiset TDVP-PS propagator, the finite-temperature dynamics classes, and the spectra routines.
+
+\subsection{Multiset TDVP-PS Propagation}
+
+Substitution of Eq.~\ref{eq:multiset-ansatz} into the time-dependent Schrodinger equation gives the coupled component equations
+\begin{equation}
+    i\frac{\partial}{\partial t}\ket{\psi_{\alpha}(t)}=
+    \sum_{\beta=1}^{N_{\mathrm e}}\hat h_{\alpha\beta}\ket{\psi_{\beta}(t)}.
+    \label{eq:block-eom}
+\end{equation}
+The implementation propagates Eq.~\ref{eq:block-eom} with a projector-splitting time-dependent variational principle (TDVP-PS),
+\begin{equation}
+    \frac{\partial}{\partial t}\ket{\Psi(A)}=-i\hat P_{T_A}\hat H\ket{\Psi(A)},
+    \label{eq:tdvp-projector}
+\end{equation}
+where \(\hat P_{T_A}\) projects onto the tangent space of the current multiset tensor-network manifold. At each site \(k\), tensors from all electronic components are collected into a batched vector and advanced by a local effective Hamiltonian,
+\begin{equation}
+    \bm A^{[k]}(t+\Delta t) \approx
+    \exp\left[-i\bm H^{[k]}_{\mathrm{eff}}\Delta t\right]\bm A^{[k]}(t).
+    \label{eq:local-update}
+\end{equation}
+The local effective Hamiltonian contains the left and right MPO environments for all active electronic block pairs. In the current implementation, the local exponential action is evaluated by a Krylov solver, and QR/SVD operations restore the MPS gauge after each forward or reverse sweep. \placeholder{Insert a concise algorithm box listing environment construction, batched site update, reverse bond update, gauge switching, and normalization.}
+
+\subsection{Initial Bond-Dimension Expansion and GPU Backend}
+
+The initial multiset state often begins as a direct product nuclear state localized on one electronic component. Before real-time propagation, Renormalizer expands the component bond dimensions using a small-amplitude hint state. For component \(\alpha\), the hint includes the diagonal block acting on \(\ket{\psi_{\alpha}}\) and driven states from off-diagonal couplings,
+\begin{equation}
+    \mathcal E_{\alpha}=\left\{\hat h_{\alpha\alpha}\ket{\psi_{\alpha}},
+    \hat h_{\alpha\beta}\ket{\psi_{\beta}}\;|\;\beta\ne\alpha\right\}.
+    \label{eq:bond-expansion-hint}
+\end{equation}
+This procedure gives initially empty virtual bonds access to directions that will be populated immediately by the Hamiltonian, reducing artifacts from an overly restrictive product-state starting manifold. The same routine is applied independently to electronic-ancilla blocks when ancilla purification is enabled.
+
+GPU acceleration is inherited from the Renormalizer backend. The array namespace \(xp\) is NumPy on CPU and CuPy on GPU, controlled by the \texttt{RENO\_GPU} environment variable. Multiset TDVP-PS benefits from this backend because site tensors over electronic components are stacked into batched arrays, and the Krylov local updates, tensor contractions, and linear algebra calls are dispatched through the same array interface. \placeholder{Insert final hardware, CuPy version, precision setting, and wall-time or memory comparison. Avoid claiming speedup until benchmark values are fixed.}
+
+\subsection{Finite-Temperature Multiset Dynamics}
+
+Finite-temperature multiset dynamics are prepared at the level of the nuclear initial state and then lifted into the multiset electronic expansion. The target thermal density is
+\begin{equation}
+    \hat\rho_{\beta}=Z^{-1}e^{-\beta\hat H},
+    \qquad Z=\Tr\left[e^{-\beta\hat H}\right].
+    \label{eq:thermal-density}
+\end{equation}
+For independent harmonic modes, the code can construct thermal product coefficients directly, for example
+\begin{equation}
+    \ket{\chi_{\beta}}=\bigotimes_j
+    \left(\sum_{n=0}^{N_j-1} c_{jn}(\beta)\ket{n_j}\ket{\tilde n_j}\right),
+    \qquad
+    c_{jn}(\beta)\propto \exp\left(-\frac{\beta\omega_j n}{2}\right),
+    \label{eq:thermal-product}
+\end{equation}
+or it can generate the thermal state by imaginary-time propagation from a maximally entangled density-matrix state.
+
+When the physical initial condition occupies a single electronic state or a prescribed pure electronic superposition, no electronic ancilla is needed. The multiset initial state is simply
+\begin{equation}
+    \ket{\Psi_{\beta}(0)} = \sum_{\alpha} c_{\alpha}\ket{\alpha}\otimes\ket{\chi_{\beta}},
+    \label{eq:thermal-ms-initial}
+\end{equation}
+with all unused electronic components initialized to negligible amplitude before normalization. This is the route used for finite-temperature exciton population dynamics when the temperature enters through the nuclear environment. An electronic ancilla is only introduced when the electronic subsystem itself must represent a thermal mixture, as in selected finite-temperature emission calculations.
+
+\subsection{Multiset MPS Spectra}
+
+Optical spectra are computed from time-domain correlation functions. At zero temperature, the absorption correlation function can be written as
+\begin{equation}
+    C_{\mathrm{abs}}(t)=
+    \bra{\Psi_{\mathrm g}}\hat\mu^{\dagger}e^{-i\hat H_{\mathrm e}t}\hat\mu\ket{\Psi_{\mathrm g}}e^{iE_{\mathrm g}t},
+    \label{eq:zt-abs}
+\end{equation}
+where \(\ket{\Psi_{\mathrm g}}\) is the ground-manifold nuclear state, \(\hat\mu\) is the transition dipole operator, and \(\hat H_{\mathrm e}\) is the excited-state Hamiltonian. At finite temperature, the trace expression is
+\begin{equation}
+    C_{\mathrm{abs}}^{\beta}(t)=
+    \Tr\left[\hat\rho_{\mathrm g}^{\beta}\hat\mu^{\dagger}e^{-i\hat H_{\mathrm e}t}\hat\mu e^{i\hat H_{\mathrm g}t}\right].
+    \label{eq:ft-abs}
+\end{equation}
+The multiset implementation evaluates these expressions by preparing dipole-excited multiset states, propagating the relevant ket or bra states, and forming component-resolved overlaps,
+\begin{equation}
+    \braket{\Phi_L|\Phi_R(t)}=
+    \sum_{\alpha,\beta} w_{\alpha\beta}\braket{\psi^L_{\alpha}|\psi^R_{\beta}(t)},
+    \label{eq:component-overlap}
+\end{equation}
+where the weights \(w_{\alpha\beta}\) collect dipole factors and electronic-basis transformations. The spectral intensity is obtained from the damped Fourier transform
+\begin{equation}
+    I(\omega)\propto\mathrm{Re}\int_0^{T}dt\,e^{i\omega t}e^{-\eta t}C(t),
+    \label{eq:fourier-spectrum}
+\end{equation}
+with broadening \(\eta\). \placeholder{Specify the exact phase convention, window, broadening, and unit conversion used for each production spectrum.}
+
+\subsection{Electronic Ancilla Purification}
+
+For finite-temperature spectra in which the excited electronic manifold is thermally mixed, the framework supports electronic ancilla purification. The state is enlarged to
+\begin{equation}
+    \ket{\Psi_{\mathrm{ea}}(t)}=
+    \sum_{\alpha=1}^{N_{\mathrm e}}\sum_{a=1}^{N_{\mathrm a}}
+    \ket{\alpha}\ket{a}\otimes\ket{\psi_{\alpha a}(t)},
+    \label{eq:electronic-ancilla}
+\end{equation}
+where \(a\) is an auxiliary electronic index. The electronic purification coefficients are obtained from the finite-temperature electronic Hamiltonian, while each \((\alpha,a)\) block is propagated by the same multiset TDVP-PS engine. This option should be distinguished from the finite-temperature dynamics in Eq.~\ref{eq:thermal-ms-initial}, which does not require an electronic ancilla when the initial electronic state is pure.
+
+\subsection{Multiset Tree Tensor Network Extension}
+
+The multiset construction also applies when each conditional nuclear wavepacket is represented by a tree tensor network rather than an MPS,
+\begin{equation}
+    \ket{\psi_{\alpha}(t)}=\sum_{\bm n}
+    \mathrm{tTr}\left[\prod_{v\in\mathcal T}T_v^{\alpha}(t)\right]_{\bm n}\ket{\bm n}.
+    \label{eq:multiset-ttns}
+\end{equation}
+Here \(\mathcal T\) is the tree topology, \(T_v^{\alpha}\) are component-specific tensors, and \(\mathrm{tTr}\) denotes contraction over internal tree bonds. This extension is used for P3HT:PCBM, where grouped local-excitation, charge-separated, fullerene, oligothiophene, and reaction-coordinate modes make non-chain topologies attractive.
+
+\subsection{Computational Details and Observables}
+
+The principal observables are electronic populations, root-mean-square electronic displacement for Holstein benchmarks, phonon occupations when relevant, time correlation functions, spectral intensities, bond dimensions, wall time, and memory use. All comparisons report the ansatz, tensor-network topology, maximum bond dimension, local basis size, time step, Krylov settings, backend, and convergence metric. \placeholder{Insert the final table of model parameters, truncation thresholds, temperature values, GPU hardware, software versions, and commit hash.}
+
+\section{Results and Discussion}
+
+\subsection{Workflow Validation and Regime Map}
+
+The first result is a regime-level validation of the multiset representation. Figure~\ref{fig:framework-overview} summarizes the workflow from Hamiltonian block construction to real-time dynamics, finite-temperature preparation, spectra, electronic ancilla purification, and TTNS propagation. The central question is not whether multiset MPS is universally superior to singleset MPS. Instead, we ask when state-resolved nuclear wavepackets reduce the burden on the tensor network.
+
+\figureplaceholder{framework-overview}{Framework overview. The final figure should compare singleset MPS, multiset MPS, multiset MPO construction, TDVP-PS propagation, finite-temperature branches, spectral correlation functions, electronic ancilla purification, GPU backend, and multiset TTNS extension.}
+
+The proposed regime map is organized around three variables: electron-phonon coupling strength, electronic coupling range, and temperature. Strong electron-phonon coupling increases the difference between conditional nuclear wavepackets attached to different electronic states. Long-range electronic coupling can delocalize the exciton over many sites and partially reduce the advantage of assigning one nuclear packet to each electronic state. Temperature broadens the nuclear initial ensemble and tests whether the multiset separation remains useful when the initial nuclear state is not a zero-temperature product state. \placeholder{Replace this qualitative map with the final quantitative boundaries extracted from Holstein and FMO/PBI calculations.}
+
+\figureplaceholder{regime-map}{Regime map for multiset advantage. The final figure should summarize strong versus weak electron-phonon coupling, short- versus long-range electronic coupling, and zero- versus finite-temperature behavior.}
+
+\subsection{Electron-Phonon Coupling Strength in Holstein Models}
+
+One- and two-dimensional Holstein models test the most direct source of multiset efficiency: electronic-state-dependent nuclear reorganization. In weak coupling, the conditional nuclear wavepackets remain similar across electronic states, so a singleset MPS can share much of the nuclear representation. In stronger coupling, each occupied electronic site carries a more distinct nuclear displacement pattern, and the multiset MPS can represent these branches as separate component wavepackets.
+
+The planned 1D and 2D figures should therefore compare singleset and multiset population dynamics across coupling scans at matched time step, local basis, and convergence target. The expected evidence is not simply a lower bond dimension, but a lower error at comparable computational cost or a comparable error at lower cost. \placeholder{Insert final alpha or G values, selected reference calculations, population/RMSD error metrics, and cost comparison.}
+
+\figureplaceholder{holstein-coupling}{Electron-phonon coupling benchmark. The final figure should show singleset versus multiset population dynamics and convergence across weak, intermediate, and strong coupling in 1D and 2D Holstein models.}
+
+\subsection{Long-Range Electronic Coupling and Delocalization}
+
+The long-range Holstein calculations test a different limitation. When electronic coupling is long ranged or when the exciton rapidly delocalizes, many electronic components can become populated and mutually coupled. In this regime, multiset MPS still provides independent conditional nuclear wavepackets, but the number of active component couplings and the cost of the multiset MPO increase. The advantage should therefore be stated as a balance between representational flexibility and intercomponent propagation cost.
+
+The manuscript should report how the singleset-multiset comparison changes as the electronic coupling range or exponent is varied. If long-range electronic coupling weakens the multiset advantage, that result is scientifically useful because it identifies a boundary of the method. If multiset remains advantageous, the evidence should show which observable benefits most. \placeholder{Insert final long-range coupling scans, including the coupling exponent, reference bond dimension, and population or diffusion metric.}
+
+\figureplaceholder{holstein-long-range}{Long-range electronic coupling benchmark. The final figure should compare electronic spreading and convergence for singleset and multiset MPS as the electronic coupling range is varied.}
+
+\subsection{Temperature Effects in Exciton Dynamics}
+
+Finite-temperature dynamics test whether the multiset formulation remains useful when the nuclear initial state is a thermal product or purified state rather than a zero-temperature Hartree product. In the implemented workflow, a pure initial electronic excitation combined with a thermal nuclear environment does not require electronic ancilla purification. The multiset state starts from Eq.~\ref{eq:thermal-ms-initial}, and temperature enters through the nuclear MPS or matrix-product density representation.
+
+The FMO 300 K calculations should be used as the primary demonstration of this capability. The comparison should include finite-temperature site populations, the chosen thermal initialization route, bond-dimension convergence, and a reference singleset or high-bond-dimension calculation. \placeholder{Insert final FMO population traces, thermal method comparison, and deviation from reference.}
+
+\figureplaceholder{fmo-temperature}{Temperature effects in exciton dynamics. The final figure should show FMO finite-temperature site populations, convergence with bond dimension, and comparison between available thermal initialization routes.}
+
+\subsection{Zero- and Finite-Temperature PBI Spectra}
+
+Spectra provide a phase-sensitive test of the implementation because peak positions and line shapes depend on the full time correlation function. The PBI calculations apply the multiset spectra workflow to zero-temperature and finite-temperature absorption or emission, using the same block Hamiltonian and TDVP-PS propagation as the population dynamics.
+
+The main text should show the real-time autocorrelation functions and the resulting spectra for selected PBI aggregates. A useful result section will separate three questions: whether the zero-temperature multiset spectrum reproduces the reference, how finite temperature changes the spectrum, and how rapidly the spectral result converges with component bond dimension. \placeholder{Insert final aggregate size, absorption or emission target, peak positions, broadening, spectral error, and reference calculation.}
+
+\figureplaceholder{pbi-spectra}{PBI spectra. The final figure should include zero-temperature and finite-temperature correlation functions and spectra for selected PBI aggregate sizes, with singleset or reference comparisons.}
+
+\subsection{Electronic Ancilla Purification for Finite-Temperature Spectra}
+
+Electronic ancilla purification is needed only for tasks where the electronic manifold itself is thermally mixed. In finite-temperature emission, this situation can arise when excited electronic states have different Boltzmann weights before propagation. The electronic ancilla construction in Eq.~\ref{eq:electronic-ancilla} represents this mixed electronic ensemble while retaining pure-state multiset propagation in the enlarged space.
+
+The PBI ancilla calculations should therefore be presented as a targeted extension rather than as the default finite-temperature method. The key comparison is the finite-temperature spectrum with nuclear-only thermal preparation versus the spectrum with both nuclear thermal preparation and electronic ancilla purification. \placeholder{Insert final spectra and specify whether the ancilla changes peak positions, relative intensities, or thermal population weights.}
+
+\figureplaceholder{electronic-ancilla}{Electronic ancilla finite-temperature spectra. The final figure should compare finite-temperature emission with and without electronic ancilla purification for the selected PBI aggregate.}
+
+\subsection{Multiset TTNS Dynamics for P3HT:PCBM}
+
+The P3HT:PCBM exciton-dissociation model provides a demanding benchmark for tensor-network topology. The model contains local excitation (LE) states, charge-separated (CS) states, fullerene modes, oligothiophene modes, and a reaction-coordinate-like mode coupling the initial LE and CS states. Recent studies have used this system to compare MPS and TTNS calculations, making it a suitable test of the multiset TTNS extension. \placeholder{Add citations to the P3HT:PCBM benchmark and pyTTN comparison.}
+
+In the multiset TTNS calculation, each electronic component is assigned a conditional nuclear tree. The primary observables are LE and CS populations, especially the initial LE state, the first CS state, and long-range charge-separated populations. Different tree topologies should be compared by population convergence and computational cost under matching time steps and basis truncations. \placeholder{Insert final Tree, TreeX, chain, and MPS comparisons only for calculations prepared under consistent settings.}
+
+\figureplaceholder{p3ht-pcbm-ttns}{P3HT:PCBM multiset TTNS benchmark. The final figure should show LE/CS population dynamics and topology comparisons for multiset MPS, multiset TTNS, and selected singleset references.}
+
+\subsection{Convergence, GPU Acceleration, and Practical Boundaries}
+
+A methods paper should make clear not only where the framework succeeds but also where it is expensive or not yet validated. The final manuscript should summarize convergence with respect to bond dimension, local basis size, time step, topology, Krylov settings, and GPU backend. GPU acceleration should be reported as a reproducible implementation result, including hardware, precision, environment variables, wall time, and memory use.
+
+\begin{table}[htbp]
+    \centering
+    \small
+    \caption{Planned summary of benchmark systems and evidence. Red entries mark values that must be replaced by final production data.}
+    \label{tab:evidence-map}
+    \begin{tabularx}{\textwidth}{p{0.18\textwidth}p{0.25\textwidth}X}
+        \toprule
+        System & Task and comparison & Evidence to insert \\
+        \midrule
+        1D Holstein & coupling and long-range dynamics; singleset MPS vs multiset MPS & \placeholder{population and RMSD errors across coupling strengths, electronic coupling range, and bond dimensions} \\
+        2D Holstein & lattice exciton dynamics; singleset MPS vs multiset MPS & \placeholder{lattice size, coupling scan, population map, and convergence trend} \\
+        FMO & finite-temperature exciton dynamics & \placeholder{300 K setup, thermal initialization route, site-population deviation, and GPU cost} \\
+        PBI & zero- and finite-temperature spectra & \placeholder{aggregate size, absorption or emission target, peak positions, spectral error, and broadening} \\
+        PBI ancilla & finite-temperature emission with electronic ancilla & \placeholder{spectral change induced by electronic thermal population or purification} \\
+        P3HT:PCBM & exciton dissociation; multiset MPS vs multiset TTNS & \placeholder{LE/CS population dynamics, topology comparison, and cost summary} \\
+        \bottomrule
+    \end{tabularx}
+\end{table}
+
+The current evidence supports the framework as a flexible implementation for finite-temperature exciton dynamics and spectra. The strongest final claims should be tied to benchmarked tasks rather than to a universal statement about all multiset tensor networks. \placeholder{Add a concise limitation paragraph after deciding which result sets are production quality.}
+
+\figureplaceholder{cost-convergence}{Convergence and GPU cost summary. The final figure should collect representative bond-dimension convergence, time-step checks, CPU/GPU wall-time comparisons, and memory measurements.}
+
+\section{Conclusions}
+
+We have outlined a GPU-accelerated multiset tensor-network framework. It targets finite-temperature exciton dynamics and spectra. The method represents the total wavefunction as a sum over electronic states with independent conditional nuclear tensor networks, constructs a multiset MPO from electronic Hamiltonian blocks, and propagates the coupled components with projector-splitting TDVP. The same implementation supports finite-temperature nuclear state preparation, spectra, electronic ancilla purification when the electronic manifold is mixed, initial bond-dimension expansion, and multiset TTNS propagation.
+
+The planned benchmark set spans Holstein models, FMO exciton dynamics, PBI spectra, and P3HT:PCBM exciton dissociation. Together, these systems are intended to show how the multiset ansatz performs across strong and weak electron-phonon coupling, long-range electronic coupling, and finite temperature. The working interpretation is that multiset MPS is most useful when independent electronic-state-resolved nuclear wavepackets are more compact than one shared singleset network. \placeholder{Replace this paragraph with the final quantitative summary of accuracy, bond dimensions, and GPU cost.}
+
+The present implementation is best viewed as a methods platform whose practical benefit depends on the Hamiltonian structure, the conditional nuclear wavepackets, the selected MPS ordering or TTNS topology, and the convergence targets. Future work should focus on production-quality GPU benchmarks, automated ordering or topology selection, and larger aggregate models for finite-temperature spectra. \placeholder{Keep only future directions directly supported by implemented capabilities.}
+
+\section*{Acknowledgement}
+
+\placeholder{Add funding information, institutional acknowledgements, and computational-resource acknowledgements.}
+
+\section*{Data and Code Availability}
+
+\placeholder{State where the Renormalizer code branch, input scripts, processed data, and plotting notebooks will be deposited. Include version, commit hash, and repository or archive link when available.}
+
+\section*{Competing Interests}
+
+The authors declare no competing interests. \placeholder{Revise if needed.}
+
+\section*{Supporting Information}
+
+\placeholder{The Supporting Information should include derivations, model parameters, convergence data, additional spectra, full population traces, GPU settings, and computational settings.}
+
+% The achemso class adds acs-main.bib automatically; list only your own .bib files here.
+\bibliography{refs}
+
+\end{document}

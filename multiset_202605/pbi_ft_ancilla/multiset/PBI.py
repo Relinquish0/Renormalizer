@@ -47,7 +47,7 @@ def construct_model(nmols) -> HolsteinModel:
 
 
 def main():
-    type_ = "hexmer"
+    type_ = "dimer"
     spectratype = "emi"
     spectra_tag = "ft_ancilla"
     dump_dir = Path(__file__).resolve().parent
@@ -55,7 +55,7 @@ def main():
 
     model = construct_model(type_)
 
-    max_bonddim = 32
+    max_bonddim = 42
     evolve_config = EvolveConfig(method=MsEvolveMethod.ms_evolve_tdvp_ps, adaptive=False)
     compress_config = CompressConfig(
         CompressCriteria.both, threshold=1e-8, max_bonddim=max_bonddim
@@ -66,7 +66,7 @@ def main():
         spectratype=spectratype,
         temperature=Quantity(298, "K"),
         max_bonddim=max_bonddim,
-        thermal_init_method="imaginary_time_exact",
+        thermal_init_method="imaginary_time_propagate",
         insteps=50,
         offset=Quantity(0),
         evolve_config=evolve_config,

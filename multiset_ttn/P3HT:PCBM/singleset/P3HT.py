@@ -29,6 +29,12 @@ model_module = load_model_module()
 P3HTPCBMModel = model_module.P3HTPCBMModel
 
 
+def build_all_electronic_fc_ttns(basis_tree, model):
+    vacuum = TTNS(basis_tree)
+    creation_ops = [Op(r"a^\dagger", state) for state in model.state_labels]
+    return TTNO(basis_tree, creation_ops) @ vacuum
+
+
 def run(job_name="p3ht_ttns", max_bond_dim=32, dt_fs=1.0, total_fs=200.0):
     model = P3HTPCBMModel()
     basis_tree = BasisTree.binary_mctdh(model.basis, contract_primitive=True)
@@ -38,7 +44,8 @@ def run(job_name="p3ht_ttns", max_bond_dim=32, dt_fs=1.0, total_fs=200.0):
     init_state = model.basis[0].dof_name_map[model.le_states[0]]
     ttns = TTNS(basis_tree, condition={model.le_states[0]: init_state})
     ttns.compress_config = CompressConfig(CompressCriteria.fixed, max_bonddim=max_bond_dim)
-    ttns = expand_bond_dimension_general(ttns, ttno, ex_mps=None)
+    tn_state_ex = build_all_electronic_fc_ttns(basis_tree, model)
+    ttns = expand_bond_dimension_general(ttns, ttno, ex_mps=tn_state_ex)
 
     step_au = Quantity(dt_fs, "fs").as_au()
     nsteps = int(round(total_fs / dt_fs))

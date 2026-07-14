@@ -125,6 +125,7 @@ class MultisetSpectraBase(MultisetTdJob):
             "autocorr": self.autocorr,
             "autocorr_components": self.autocorr_components,
             "bond_dims": self.bond_dims,
+            "carrier_energy": getattr(self, "carrier_energy", 0.0),
         }
 
     def _get_dipole(self) -> np.ndarray:
@@ -309,6 +310,7 @@ class MultisetSpectraFiniteT(MultisetSpectraBase):
         self.offset = offset
         self.expand = expand
         self.use_electronic_ancilla = use_electronic_ancilla
+        self.carrier_energy = 0.0
         if model is None or max_bonddim is None:
             raise ValueError("Both `model` and `max_bonddim` are required.")
         self.ms_model = MultisetModel(
@@ -359,6 +361,7 @@ class MultisetSpectraFiniteT(MultisetSpectraBase):
             excited_energy.as_au(),
             excited_energy.as_au() / Quantity(1, "eV").as_au(),
         )
+        self.carrier_energy = excited_energy.as_au()
         self._set_multiset_hamiltonian_offset(excited_energy + self.offset)
         return ket.copy(), ket
 

@@ -14,6 +14,7 @@ from renormalizer.mps.svd_qn import add_outer, get_qn_mask
 from renormalizer.tn.node import TreeNodeTensor, copy_connection
 from renormalizer.tn.tree import TTNO, TTNS, get_skip_pidx
 from renormalizer.tn.treebase import BasisTree, Tree
+from renormalizer.utils import calc_vn_entropy_dm
 from renormalizer.utils.configs import CompressConfig, CompressCriteria, EvolveConfig, EvolveMethod
 
 
@@ -483,16 +484,16 @@ class MsTTNS(MsTTNBase):
     def expand_bond_dimension_multiset(
         self, ms_ttno: "MsTTNO", coef: float = 1e-10, use_hint: bool = True, graph_rounds: int = None
     ):
+        if graph_rounds is not None:
+            logger.warning(
+                "graph_rounds is ignored by direct multiset TTNS bond expansion; "
+                "expansion now follows MultisetModel.expand_bond_dimension_multiset."
+            )
+
         original_ttns = self.to_ttns_list()
         for ttns in original_ttns:
             ttns.compress_config = self.compress_config.copy()
             ttns.evolve_config = self.evolve_config.copy()
-
-        multiround_cross_hints = None
-        if use_hint:
-            multiround_cross_hints = self._build_multiround_cross_hints(
-                original_ttns, ms_ttno, graph_rounds=graph_rounds
-            )
 
         expanded_components = []
         for alpha in range(self.nset):
@@ -503,16 +504,24 @@ class MsTTNS(MsTTNBase):
                 expanded = self._expand_component_bond_dimension(ttns_alpha, hint_ttno=None, coef=coef, ex_ttns=None)
             else:
                 diag_ttno = None
+                cross_states = []
                 for pair_id in ms_ttno.active_pairs_by_alpha[alpha]:
                     pair_alpha, beta = ms_ttno.active_pairs_index[pair_id]
                     assert pair_alpha == alpha
                     pair_ttno = ms_ttno.active_pair_ttnos[pair_id]
                     if beta == alpha:
                         diag_ttno = pair_ttno
-                cross_states = multiround_cross_hints[alpha]
+                    else:
+                        driven = pair_ttno.apply(original_ttns[beta])
+                        driven.compress_config = self.compress_config.copy()
+                        driven.evolve_config = self.evolve_config.copy()
+                        cross_states.append(driven)
+
                 ex_ttns = self._sum_ttns(cross_states, compress=False) if cross_states else None
                 if ex_ttns is not None:
                     ex_ttns.compress_config = self.compress_config.copy()
+                    ex_ttns.evolve_config = self.evolve_config.copy()
+
                 expanded = self._expand_component_bond_dimension(
                     ttns_alpha,
                     hint_ttno=diag_ttno,
@@ -641,6 +650,125 @@ class MsTTNS(MsTTNBase):
         self._population_cache = np.asarray(populations)
         return self._population_cache.copy()
 
+    def rdm_el(self):
+        bra_idx = ("ms_bra_set", str(id(self)))
+        ket_idx = ("ms_ket_set", str(id(self)))
+        env_children = {node: [] for node in self.node_list}
+        root_env = None
+        for node in self.postorder_list():
+            args = []
+            for ichild, child_env in enumerate(env_children[node]):
+                child = node.children[ichild]
+                args.extend([
+                    child_env,
+                    [
+                        bra_idx,
+                        ket_idx,
+                        self._norm_parent_indices(child, conj=True),
+                        self._norm_parent_indices(child, conj=False),
+                    ],
+                ])
+            args.extend([node.tensor.conj(), [bra_idx] + self._norm_node_indices(node, conj=True)])
+            args.extend([node.tensor, [ket_idx] + self._norm_node_indices(node, conj=False)])
+            output_indices = [
+                bra_idx,
+                ket_idx,
+                self._norm_parent_indices(node, conj=True),
+                self._norm_parent_indices(node, conj=False),
+            ]
+            args.append(output_indices)
+            env = asnumpy(oe_contract(*asxp_oe_args(args)))
+            if node.parent is None:
+                root_env = env
+            else:
+                env_children[node.parent].append(env)
+
+        overlaps = root_env.reshape(self.nset, self.nset, -1).sum(axis=2)
+        return np.asarray(overlaps.T)
+
+    def calc_electronic_entropy(self, rdm_el=None):
+        if rdm_el is None:
+            rdm_el = self.rdm_el()
+        rdm_el = (rdm_el + rdm_el.conj().T) / 2
+        return calc_vn_entropy_dm(rdm_el)
+
+    def calc_bond_entropy_cond_raw_allset(self, populations=None, atol: float = 1e-14):
+        if populations is None:
+            populations = self.population()
+
+        components = self.to_ttns_list()
+        S_cond_all = []
+        S_raw_all = []
+        for population, component in zip(populations, components):
+            population = max(float(np.real(population)), 0.0)
+            S_cond = np.zeros(len(self.node_list), dtype=float)
+            if population > 0.0 and component.root.children:
+                s_array = np.asarray(component.calc_bond_singular_values(), dtype=float)
+                for inode, sigma in enumerate(s_array):
+                    if self.node_list[inode].parent is None:
+                        continue
+                    weights = np.square(np.abs(sigma))
+                    q = weights / population
+                    q = q[q > atol]
+                    if q.size == 0:
+                        continue
+                    entropy = -float(np.sum(q * np.log(q)))
+                    S_cond[inode] = 0.0 if abs(entropy) < atol else entropy
+
+            if population == 0.0:
+                S_raw = np.zeros_like(S_cond, dtype=float)
+            else:
+                S_raw = population * S_cond - population * np.log(population)
+            S_cond_all.append(S_cond)
+            S_raw_all.append(S_raw)
+        return np.asarray(S_cond_all, dtype=float), np.asarray(S_raw_all, dtype=float)
+
+    def calc_bond_entropy_allset(self):
+        S_cond, _ = self.calc_bond_entropy_cond_raw_allset()
+        return S_cond
+
+    def calc_bond_entropy_unnormed_allset(self, S_all_normed=None, populations=None):
+        if S_all_normed is None:
+            S_all_normed = self.calc_bond_entropy_allset()
+        if populations is None:
+            populations = self.population()
+        S_all_unnormed = []
+        for entropy, population in zip(S_all_normed, populations):
+            entropy = np.asarray(entropy, dtype=float)
+            population = max(float(np.real(population)), 0.0)
+            if population == 0.0:
+                S_all_unnormed.append(np.zeros_like(entropy, dtype=float))
+            else:
+                S_all_unnormed.append(population * entropy - population * np.log(population))
+        return np.asarray(S_all_unnormed, dtype=float)
+
+    def calc_bond_entropy_summary(self, include_unnormed: bool = False):
+        populations = self.population()
+        S_all = self.calc_bond_entropy_allset()
+        if S_all.size == 0 or S_all.shape[1] == 0:
+            S_maxbond_eachset = np.zeros(self.nset, dtype=float)
+        else:
+            S_maxbond_eachset = np.max(S_all, axis=1)
+        S_maxbond = float(np.max(S_maxbond_eachset)) if len(S_maxbond_eachset) > 0 else 0.0
+        if not include_unnormed:
+            return S_all, S_maxbond_eachset, S_maxbond
+
+        S_all_unnormed = self.calc_bond_entropy_unnormed_allset(S_all, populations)
+        if S_all_unnormed.size == 0 or S_all_unnormed.shape[1] == 0:
+            S_maxbond_eachset_unnormed = np.zeros(self.nset, dtype=float)
+        else:
+            S_maxbond_eachset_unnormed = np.max(S_all_unnormed, axis=1)
+        S_maxbond_unnormed = (
+            float(np.max(S_maxbond_eachset_unnormed)) if len(S_maxbond_eachset_unnormed) > 0 else 0.0
+        )
+        return S_all, S_maxbond_eachset, S_maxbond, S_all_unnormed, S_maxbond_eachset_unnormed, S_maxbond_unnormed
+
+    def calc_bond_entropy(self):
+        S_all = self.calc_bond_entropy_allset()
+        if S_all.size == 0 or S_all.shape[1] == 0:
+            return np.zeros(len(self.node_list), dtype=float)
+        return np.max(S_all, axis=0)
+
     def ms_normalize(self, kind="ttns_only"):
         if kind != "ttns_only":
             raise ValueError(f"Unsupported normalization kind for MsTTNS: {kind}")
@@ -702,6 +830,7 @@ class MsTTNO(MsTTNBase):
             [onode.tensor for onode in ttno.node_list] for ttno in self.active_pair_ttnos
         ]
         self.node_groups = self._build_node_groups()
+        self.hop_expr_cache = {}
 
     @staticmethod
     def _terms_from_entry(entry):

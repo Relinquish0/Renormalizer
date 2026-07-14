@@ -58,7 +58,7 @@ if __name__ == "__main__":
     mol_arangement = np.array([7, 5, 3, 1, 2, 4, 6]) - 1
     model = HolsteinModel(list(np.array(mlist)[mol_arangement]), j_matrix_au[mol_arangement][:, mol_arangement], )
 
-    max_bonddim = 16
+    max_bonddim = 64
     evolve_dt = 160
     n_snapshots = 250
     dynamics_job = MultisetChargeDiffusionDynamics(
@@ -66,7 +66,7 @@ if __name__ == "__main__":
         max_bonddim=max_bonddim,
         temperature=Quantity(300, "K"),
         stop_at_edge=False,
-        method="imaginary_time_propagate",
+        method="thermo_field",
         dump_dir="./",
         job_name="fmo_300K_{}bd".format(max_bonddim),
     )

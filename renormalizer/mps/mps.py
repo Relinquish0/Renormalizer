@@ -31,6 +31,12 @@ from renormalizer.mps.matrix import (
     asxp)
 from renormalizer.mps.mp import MatrixProduct
 from renormalizer.mps.hop_expr import hop_expr
+from renormalizer.mps.cbe import (
+    cbe_expand_left_to_right,
+    cbe_expand_right_to_left,
+    cbe_shrewd_selection_left_to_right,
+    cbe_shrewd_selection_right_to_left,
+)
 from renormalizer.mps.mpo import Mpo
 from renormalizer.utils import (
     OptimizeConfig,
@@ -113,6 +119,254 @@ def adaptive_tdvp(fun):
                 cur_mps = mps_half2
 
     return adaptive_fun
+
+
+def _cbe_should_be_active(config):
+    if getattr(config, "expansion_method", "krylov") != "cbe":
+        return False
+    if getattr(config, "cbe_runtime_disabled", False):
+        return False
+    if getattr(config, "cbe_disable_after_warmup", True):
+        return getattr(config, "current_time", 0.0) < getattr(config, "cbe_warmup_time", 0.0)
+    return True
+
+
+def _cbe_seed_hopping_paths(mps, config):
+    """Seed scheme<4 Holstein electronic hopping qn paths during CBE warm-up.
+
+    The local CBE selector can add a single bond sector, but separated
+    BasisSimpleElectron sites need the whole virtual qn path for an electronic
+    hopping channel to survive qn-aware SVD.  This adds a tiny one-exciton
+    scaffold for the sites touched by nonzero J_ij, then leaves real-time TDVP
+    to populate those sectors.
+    """
+    info = {
+        "enabled": bool(getattr(config, "cbe_path_seed", True)),
+        "applied": False,
+        "reason": "not_requested",
+        "coef": float(getattr(config, "cbe_path_seed_coef", 1e-10)),
+        "active_electronic_dofs": [],
+        "num_hopping_terms": 0,
+        "bond_dims_before": list(mps.bond_dims),
+        "bond_dims_after": list(mps.bond_dims),
+    }
+    if not info["enabled"]:
+        info["reason"] = "disabled"
+        return mps, info
+    if getattr(config, "cbe_path_seed_done", False):
+        info["reason"] = "already_done"
+        return mps, info
+    model = getattr(mps, "model", None)
+    if model is None or getattr(model, "scheme", 4) >= 4 or not hasattr(model, "j_matrix"):
+        info["reason"] = "not_scheme_lt_4_holstein"
+        setattr(config, "cbe_path_seed_done", True)
+        return mps, info
+    j_matrix = np.asarray(model.j_matrix)
+    active_dofs = set()
+    num_hopping = 0
+    tol = float(getattr(config, "cbe_path_seed_j_tol", 0.0))
+    for i in range(j_matrix.shape[0]):
+        for j in range(j_matrix.shape[1]):
+            if i == j:
+                continue
+            if abs(j_matrix[i, j]) > tol:
+                active_dofs.add(i)
+                active_dofs.add(j)
+                num_hopping += 1
+    info["active_electronic_dofs"] = sorted(active_dofs)
+    info["num_hopping_terms"] = int(num_hopping)
+    if not active_dofs:
+        info["reason"] = "no_nonzero_hopping"
+        setattr(config, "cbe_path_seed_done", True)
+        return mps, info
+
+    coef = info["coef"]
+    if coef <= 0:
+        info["reason"] = "nonpositive_coef"
+        setattr(config, "cbe_path_seed_done", True)
+        return mps, info
+
+    gs = Mps.ground_state(model, max_entangled=False)
+    gs.evolve_config = mps.evolve_config
+    gs.compress_config = mps.compress_config
+    seed = None
+    for dof in info["active_electronic_dofs"]:
+        state = Mpo.onsite(model, r"a^\dagger", dof_set={dof}).apply(gs.copy())
+        state.evolve_config = mps.evolve_config
+        state.compress_config = mps.compress_config
+        state.move_qnidx(mps.qnidx)
+        state.to_right = mps.to_right
+        seed = state if seed is None else seed + state
+    if seed is None or seed.norm == 0:
+        info["reason"] = "zero_seed_state"
+        setattr(config, "cbe_path_seed_done", True)
+        return mps, info
+
+    seed.scale(coef * mps.norm / seed.norm, inplace=True)
+    seed.move_qnidx(mps.qnidx)
+    seed.to_right = mps.to_right
+    seeded = (mps + seed).canonicalise()
+    seeded.evolve_config = mps.evolve_config
+    seeded.compress_config = mps.compress_config
+    info["applied"] = True
+    info["reason"] = "seeded"
+    info["bond_dims_after"] = list(seeded.bond_dims)
+    setattr(config, "cbe_path_seed_done", True)
+    logger.info(
+        "CBE hopping path seed: applied=%s coef=%.3e hopping_terms=%s active_electronic_dofs=%s "
+        "bond_dims_before=%s bond_dims_after=%s",
+        info["applied"], coef, info["num_hopping_terms"], info["active_electronic_dofs"],
+        info["bond_dims_before"], info["bond_dims_after"],
+    )
+    return seeded, info
+
+
+def _cbe_init_stats(config, cbe_active, bond_dims_before, evolve_dt):
+    return {
+        "step_index": getattr(config, "step_index", None),
+        "time": getattr(config, "current_time", None),
+        "dt": evolve_dt,
+        "cbe_active": bool(cbe_active),
+        "expansion_method": getattr(config, "expansion_method", "krylov"),
+        "cbe_Dmax": getattr(config, "cbe_Dmax", None),
+        "cbe_warmup_time": getattr(config, "cbe_warmup_time", None),
+        "cbe_warmup_substeps": getattr(config, "cbe_warmup_substeps", None),
+        "bond_dims_before": list(bond_dims_before),
+        "bond_dims_after": None,
+        "num_calls": 0,
+        "num_expanded_bonds": 0,
+        "D_expands": [],
+        "max_D_expand": 0,
+        "avg_D_expand": 0.0,
+        "max_discarded_weight": 0.0,
+        "sum_discarded_weight": 0.0,
+        "discarded_weights": [],
+        "pretrim_new_sector_norms": [],
+        "pretrim_new_sector_relative_norms": [],
+        "pretrim_singular_values": [],
+        "pretrim_keep_dims": [],
+        "orthogonality_errors": [],
+        "isometry_errors": [],
+        "wavefunction_preservation_errors": [],
+        "zero_expand_reasons": [],
+        "stage": "warm-up" if cbe_active else "production",
+    }
+
+
+def _cbe_record_selection(cbe_stats, selection, expansion=None, accepted=True):
+    cbe_stats["num_calls"] += 1
+    d_expand = int(selection.D_expand)
+    cbe_stats["D_expands"].append(d_expand)
+    cbe_stats["max_D_expand"] = max(cbe_stats["max_D_expand"], d_expand)
+    if d_expand > 0 and accepted:
+        cbe_stats["num_expanded_bonds"] += 1
+    else:
+        reason = selection.debug_info.get("reason", "unknown")
+        if d_expand > 0 and not accepted:
+            reason = "nonisometric_expansion"
+        cbe_stats["zero_expand_reasons"].append(reason)
+    if selection.debug_info.get("orthogonality_error") is not None:
+        cbe_stats["orthogonality_errors"].append(float(selection.debug_info["orthogonality_error"]))
+    if expansion is not None:
+        cbe_stats["orthogonality_errors"].append(float(expansion.orthogonality_error))
+        cbe_stats["isometry_errors"].append(float(expansion.isometry_error))
+        cbe_stats["wavefunction_preservation_errors"].append(float(expansion.wavefunction_error))
+
+
+def _cbe_record_discarded(cbe_stats, discarded_weight):
+    discarded_weight = float(discarded_weight)
+    cbe_stats["discarded_weights"].append(discarded_weight)
+    cbe_stats["max_discarded_weight"] = max(cbe_stats["max_discarded_weight"], discarded_weight)
+    cbe_stats["sum_discarded_weight"] += discarded_weight
+
+
+def _cbe_record_pretrim(cbe_stats, new_sector_norm, total_norm, singular_values, keep_dim):
+    new_sector_norm = float(new_sector_norm)
+    total_norm = float(total_norm)
+    relative_norm = new_sector_norm / total_norm if total_norm > 0 else 0.0
+    cbe_stats["pretrim_new_sector_norms"].append(new_sector_norm)
+    cbe_stats["pretrim_new_sector_relative_norms"].append(relative_norm)
+    cbe_stats["pretrim_singular_values"].append(np.array(singular_values, dtype=float))
+    cbe_stats["pretrim_keep_dims"].append(int(keep_dim))
+    return relative_norm
+
+
+def _cbe_finalize_stats(cbe_stats, mps):
+    cbe_stats["bond_dims_after"] = list(mps.bond_dims)
+    if cbe_stats["D_expands"]:
+        cbe_stats["avg_D_expand"] = float(np.mean(cbe_stats["D_expands"]))
+    return cbe_stats
+
+
+def _cbe_qn_key(qn):
+    return tuple(np.asarray(qn, dtype=int).tolist())
+
+
+def _cbe_pick_indices(sigma, qnset, config, required_qn=None):
+    if len(sigma) == 0:
+        return [], 0.0
+    dmax = int(getattr(config, "cbe_Dmax", len(sigma)))
+    eps = getattr(config, "cbe_eps_trim", 1e-12)
+    selected = [idx for idx, sval in enumerate(sigma) if sval > eps]
+    if not selected:
+        selected = [0]
+    if required_qn is not None and len(required_qn) != 0:
+        selected_set = set(selected)
+        qn_keys = [_cbe_qn_key(qn) for qn in qnset]
+        for qn in required_qn:
+            key = _cbe_qn_key(qn)
+            for idx, qn_key in enumerate(qn_keys):
+                if qn_key == key and idx not in selected_set:
+                    selected.append(idx)
+                    selected_set.add(idx)
+                    break
+    selected = sorted(selected, key=lambda idx: float(sigma[idx]), reverse=True)
+    if len(selected) > dmax:
+        selected = selected[:dmax]
+    selected = sorted(selected)
+    total = float(np.sum(sigma ** 2))
+    kept = float(np.sum(sigma[selected] ** 2)) if selected else 0.0
+    discarded = max(total - kept, 0.0) / total if total > 0 else 0.0
+    return selected, discarded
+
+
+def _cbe_left_isometry_error(tensor):
+    arr = asnumpy(tensor.array if hasattr(tensor, "array") else tensor)
+    mat = arr.reshape(-1, arr.shape[-1])
+    return float(np.linalg.norm(mat.conj().T @ mat - np.eye(mat.shape[1])))
+
+
+def _cbe_right_isometry_error(tensor):
+    arr = asnumpy(tensor.array if hasattr(tensor, "array") else tensor)
+    mat = arr.reshape(arr.shape[0], -1)
+    return float(np.linalg.norm(mat @ mat.conj().T - np.eye(mat.shape[0])))
+
+
+def _cbe_svd_trim(mps, mps_t, imps, system, config, required_qn=None):
+    shape = list(mps_t.shape)
+    qnbigl, qnbigr, _ = mps._get_big_qn([imps])
+    u, su, qnlset, v, sv, qnrset = svd_qn.svd_qn(
+        asnumpy(mps_t), qnbigl, qnbigr, mps.qntot,
+        QR=False, system=system, full_matrices=False,
+    )
+    active_qn = qnlset if system == "L" else qnrset
+    keep_idx, discarded = _cbe_pick_indices(su, active_qn, config, required_qn)
+    if system == "L":
+        site = u[:, keep_idx].reshape(shape[:-1] + [len(keep_idx)])
+        transfer = np.einsum("i,ij->ij", su[keep_idx], v.T[keep_idx, :])
+        qnnew = np.array(qnlset)[keep_idx]
+    else:
+        site = v.T[keep_idx, :].reshape([len(keep_idx)] + shape[1:])
+        transfer = np.einsum("ji,i->ji", u[:, keep_idx], su[keep_idx])
+        qnnew = np.array(qnrset)[keep_idx]
+    trim_info = {
+        "singular_values": np.array(su, dtype=float),
+        "keep": int(len(keep_idx)),
+        "discarded_weight": float(discarded),
+        "keep_indices": list(map(int, keep_idx)),
+    }
+    return site, transfer, qnnew, discarded, trim_info
+
 
 
 class Mps(MatrixProduct):
@@ -643,22 +897,80 @@ class Mps(MatrixProduct):
 
     def evolve(self, mpo, evolve_dt, normalize=True) -> "Mps":
 
-        method = {
-            EvolveMethod.prop_and_compress: self._evolve_prop_and_compress,
-            EvolveMethod.prop_and_compress_tdrk4: self._evolve_prop_and_compress_tdrk4,
-            EvolveMethod.prop_and_compress_tdrk: self._evolve_prop_and_compress_tdrk,
-            EvolveMethod.tdvp_mu_vmf: self._evolve_tdvp_mu_vmf,
-            EvolveMethod.tdvp_vmf: self._evolve_tdvp_mu_vmf,
-            EvolveMethod.tdvp_mu_cmf: self._evolve_tdvp_mu_cmf,
-            EvolveMethod.tdvp_ps: self._evolve_tdvp_ps,
-            EvolveMethod.tdvp_ps2: self._evolve_tdvp_ps2
-        }[self.evolve_config.method]
+        bond_dims_before = list(self.bond_dims)
+        if (
+            self.evolve_config.method == EvolveMethod.tdvp_ps
+            and getattr(self.evolve_config, "expansion_method", "krylov") == "cbe"
+        ):
+            method = self._evolve_cbe_tdvp_ps
+        else:
+            if hasattr(self.evolve_config, "cbe_last_stats"):
+                self.evolve_config.cbe_last_stats = None
+            method = {
+                EvolveMethod.prop_and_compress: self._evolve_prop_and_compress,
+                EvolveMethod.prop_and_compress_tdrk4: self._evolve_prop_and_compress_tdrk4,
+                EvolveMethod.prop_and_compress_tdrk: self._evolve_prop_and_compress_tdrk,
+                EvolveMethod.tdvp_mu_vmf: self._evolve_tdvp_mu_vmf,
+                EvolveMethod.tdvp_vmf: self._evolve_tdvp_mu_vmf,
+                EvolveMethod.tdvp_mu_cmf: self._evolve_tdvp_mu_cmf,
+                EvolveMethod.tdvp_ps: self._evolve_tdvp_ps,
+                EvolveMethod.tdvp_ps2: self._evolve_tdvp_ps2
+            }[self.evolve_config.method]
         new_mps = method(mpo, evolve_dt)
+        if (
+            self.evolve_config.method == EvolveMethod.tdvp_ps
+            and getattr(self.evolve_config, "expansion_method", "krylov") != "cbe"
+            and hasattr(new_mps.evolve_config, "cbe_last_stats")
+        ):
+            new_mps.evolve_config.cbe_last_stats = _cbe_finalize_stats(
+                _cbe_init_stats(new_mps.evolve_config, False, bond_dims_before, evolve_dt),
+                new_mps,
+            )
         if normalize:
             if np.iscomplex(evolve_dt):
                 new_mps.normalize("mps_and_coeff")
             else:
                 new_mps.normalize("mps_only")
+        cbe_stats = getattr(new_mps.evolve_config, "cbe_last_stats", None)
+        if cbe_stats is not None:
+            cbe_stats["bond_dims_before"] = bond_dims_before
+            cbe_stats["bond_dims_after"] = list(new_mps.bond_dims)
+            norm = new_mps.norm
+            finite = np.isfinite(norm)
+            try:
+                occ = new_mps.e_occupations
+                occ_finite = bool(np.all(np.isfinite(occ)))
+            except Exception:
+                occ = None
+                occ_finite = None
+            pretrim_rel = cbe_stats.get("pretrim_new_sector_relative_norms", [])
+            pretrim_svals = cbe_stats.get("pretrim_singular_values", [])
+            second_svals = [float(vals[1]) if len(vals) > 1 else 0.0 for vals in pretrim_svals]
+            max_pretrim_rel = max(pretrim_rel) if pretrim_rel else 0.0
+            avg_pretrim_rel = float(np.mean(pretrim_rel)) if pretrim_rel else 0.0
+            max_second_singular = max(second_svals) if second_svals else 0.0
+            pretrim_keep_dims = cbe_stats.get("pretrim_keep_dims", [])
+            max_pretrim_keep = max(pretrim_keep_dims) if pretrim_keep_dims else 0
+            logger.info(
+                "TDVP step summary: step=%s time=%s dt=%s stage=%s cbe_active=%s "
+                "expansion_method=%s cbe_Dmax=%s warmup_time=%s warmup_substeps=%s "
+                "bond_dims_before=%s bond_dims_after=%s max_bond_before=%s max_bond_after=%s "
+                "cbe_calls=%s expanded_bonds=%s max_D_expand=%s avg_D_expand=%s "
+                "max_pretrim_new_sector_relative_norm=%s avg_pretrim_new_sector_relative_norm=%s "
+                "max_second_singular_before_trim=%s max_pretrim_keep=%s "
+                "max_discarded_weight=%s sum_discarded_weight=%s norm=%s norm_finite=%s "
+                "occupation_finite=%s e_occupations=%s zero_expand_reasons=%s",
+                cbe_stats.get("step_index"), cbe_stats.get("time"), cbe_stats.get("dt"),
+                cbe_stats.get("stage"), cbe_stats.get("cbe_active"), cbe_stats.get("expansion_method"),
+                cbe_stats.get("cbe_Dmax"), cbe_stats.get("cbe_warmup_time"),
+                cbe_stats.get("cbe_warmup_substeps"), bond_dims_before, list(new_mps.bond_dims),
+                max(bond_dims_before), max(new_mps.bond_dims), cbe_stats.get("num_calls"),
+                cbe_stats.get("num_expanded_bonds"), cbe_stats.get("max_D_expand"),
+                cbe_stats.get("avg_D_expand"), max_pretrim_rel, avg_pretrim_rel,
+                max_second_singular, max_pretrim_keep, cbe_stats.get("max_discarded_weight"),
+                cbe_stats.get("sum_discarded_weight"), norm, finite, occ_finite, occ,
+                cbe_stats.get("zero_expand_reasons"),
+            )
         return new_mps
     
     def _evolve_prop_and_compress_tdrk4(self, mpo, evolve_dt) -> "Mps":
@@ -1400,6 +1712,320 @@ class Mps(MatrixProduct):
         steps_stat = stats.describe(local_steps)
         logger.debug(f"TDVP-PS Krylov space: {steps_stat}")
         mps.evolve_config.stat = steps_stat
+
+        return mps
+
+    @adaptive_tdvp
+    def _evolve_cbe_tdvp_ps(self, mpo, evolve_dt) -> "Mps":
+        # PhysRevB.94.165116
+        # TDVP projector splitting
+        # one-site
+        if np.iscomplex(evolve_dt):
+            mps = self.copy()
+            if self.evolve_config.ivp_solver != "krylov":
+                evolve_dt = -evolve_dt.imag
+                # used in calculating derivatives
+                coef = -1
+        else:
+            mps = self.to_complex()
+            if self.evolve_config.ivp_solver != "krylov":
+                coef = 1j
+
+        cbe_active = _cbe_should_be_active(self.evolve_config)
+        cbe_bond_dims_before = list(mps.bond_dims)
+        cbe_path_seed_info = None
+        if cbe_active:
+            mps, cbe_path_seed_info = _cbe_seed_hopping_paths(mps, self.evolve_config)
+        cbe_stats = _cbe_init_stats(self.evolve_config, cbe_active, cbe_bond_dims_before, evolve_dt)
+        cbe_stats["path_seed"] = cbe_path_seed_info
+        cbe_stats["bond_dims_after_path_seed"] = list(mps.bond_dims)
+
+        # construct the environment matrix
+        # almost half is not used. Not a big deal.
+        environ = Environ(mps, mpo)
+
+        # statistics for debug output
+        local_steps = []
+        # sweep for 2 rounds
+        for i in range(2):
+            for imps in mps.iter_idx_list(full=True):
+                system = "L" if mps.to_right else "R"
+                l_array = environ.read("L", imps - 1)
+                r_array = environ.read("R", imps + 1)
+                use_cbe_trim = False
+                cbe_direction = None
+                cbe_bond_idx = None
+                cbe_D_before = None
+                cbe_D_expand = 0
+                cbe_new_axis = None
+                cbe_new_axis_start = None
+
+                if cbe_active and (not mps.to_right) and imps != 0:
+                    bond_idx = imps - 1
+                    iso_error = _cbe_left_isometry_error(mps[bond_idx])
+                    iso_tol = getattr(self.evolve_config, "cbe_isometry_tol", 1e-8)
+                    if iso_error > iso_tol:
+                        cbe_stats["zero_expand_reasons"].append("nonisometric_left_basis")
+                        cbe_stats["isometry_errors"].append(float(iso_error))
+                        logger.debug(
+                            "Skip CBE right-to-left expansion at bond=%s: left-isometry error %.6e > %.6e",
+                            bond_idx, iso_error, iso_tol,
+                        )
+                    else:
+                        cbe_l = environ.read("L", bond_idx - 1)
+                        selection = cbe_shrewd_selection_right_to_left(
+                        mps, mpo, bond_idx, cbe_l, r_array,
+                        cbe_Dmax=self.evolve_config.cbe_Dmax,
+                        cbe_eps_pre=self.evolve_config.cbe_eps_pre,
+                        cbe_eps_final=self.evolve_config.cbe_eps_final,
+                        cbe_eps_trim=self.evolve_config.cbe_eps_trim,
+                        cbe_max_expand=self.evolve_config.cbe_max_expand,
+                        cbe_Dpre=getattr(self.evolve_config, "cbe_Dpre", None),
+                        )
+                        A_tr = selection.tensor
+                        qn_new = selection.qn
+                        if qn_new is None:
+                            qn_new = np.zeros((selection.D_expand, mps.model.qn_size), dtype=int)
+                        expansion = cbe_expand_right_to_left(
+                            mps[bond_idx].array, mps[imps].array, A_tr,
+                            l_array=cbe_l, W_l=mpo[bond_idx].array, bond_idx=bond_idx,
+                        )
+                        expansion_ok = (
+                            selection.D_expand > 0
+                            and expansion.orthogonality_error <= iso_tol
+                            and expansion.isometry_error <= iso_tol
+                            and expansion.wavefunction_error <= iso_tol
+                        )
+                        _cbe_record_selection(
+                            cbe_stats, selection, expansion,
+                            accepted=(selection.D_expand == 0 or expansion_ok),
+                        )
+                        if selection.D_expand > 0 and not expansion_ok:
+                            logger.debug(
+                                "Skip CBE right-to-left expansion at bond=%s: "
+                                "orthogonality %.6e isometry %.6e wavefunction %.6e exceed %.6e",
+                                bond_idx, expansion.orthogonality_error,
+                                expansion.isometry_error, expansion.wavefunction_error, iso_tol,
+                            )
+                        elif selection.D_expand > 0:
+                            cbe_direction = "right-to-left"
+                            cbe_bond_idx = bond_idx
+                            cbe_D_before = int(mps[imps].shape[0])
+                            cbe_D_expand = int(selection.D_expand)
+                            cbe_new_axis = 0
+                            cbe_new_axis_start = cbe_D_before
+                            mps[bond_idx] = expansion.A_ex
+                            mps[imps] = expansion.C_ex
+                            mps.qn[imps] = np.concatenate([np.array(mps.qn[imps]), qn_new], axis=0)
+                            l_array = expansion.L_ex
+                            environ.write("L", bond_idx, l_array)
+                            use_cbe_trim = True
+
+                elif cbe_active and mps.to_right and imps != len(mps) - 1:
+                    bond_idx = imps
+                    iso_error = _cbe_right_isometry_error(mps[bond_idx + 1])
+                    iso_tol = getattr(self.evolve_config, "cbe_isometry_tol", 1e-8)
+                    if iso_error > iso_tol:
+                        cbe_stats["zero_expand_reasons"].append("nonisometric_right_basis")
+                        cbe_stats["isometry_errors"].append(float(iso_error))
+                        logger.debug(
+                            "Skip CBE left-to-right expansion at bond=%s: right-isometry error %.6e > %.6e",
+                            bond_idx, iso_error, iso_tol,
+                        )
+                    else:
+                        cbe_r = environ.read("R", bond_idx + 2)
+                        selection = cbe_shrewd_selection_left_to_right(
+                        mps, mpo, bond_idx, l_array, cbe_r,
+                        cbe_Dmax=self.evolve_config.cbe_Dmax,
+                        cbe_eps_pre=self.evolve_config.cbe_eps_pre,
+                        cbe_eps_final=self.evolve_config.cbe_eps_final,
+                        cbe_eps_trim=self.evolve_config.cbe_eps_trim,
+                        cbe_max_expand=self.evolve_config.cbe_max_expand,
+                        cbe_Dpre=getattr(self.evolve_config, "cbe_Dpre", None),
+                        )
+                        B_tr = selection.tensor
+                        qn_new = selection.qn
+                        if qn_new is None:
+                            qn_new = np.zeros((selection.D_expand, mps.model.qn_size), dtype=int)
+                        expansion = cbe_expand_left_to_right(
+                            mps[imps].array, mps[bond_idx + 1].array, B_tr,
+                            r_array=cbe_r, W_right=mpo[bond_idx + 1].array, bond_idx=bond_idx,
+                        )
+                        expansion_ok = (
+                            selection.D_expand > 0
+                            and expansion.orthogonality_error <= iso_tol
+                            and expansion.isometry_error <= iso_tol
+                            and expansion.wavefunction_error <= iso_tol
+                        )
+                        _cbe_record_selection(
+                            cbe_stats, selection, expansion,
+                            accepted=(selection.D_expand == 0 or expansion_ok),
+                        )
+                        if selection.D_expand > 0 and not expansion_ok:
+                            logger.debug(
+                                "Skip CBE left-to-right expansion at bond=%s: "
+                                "orthogonality %.6e isometry %.6e wavefunction %.6e exceed %.6e",
+                                bond_idx, expansion.orthogonality_error,
+                                expansion.isometry_error, expansion.wavefunction_error, iso_tol,
+                            )
+                        elif selection.D_expand > 0:
+                            cbe_direction = "left-to-right"
+                            cbe_bond_idx = bond_idx
+                            cbe_D_before = int(mps[imps].shape[-1])
+                            cbe_D_expand = int(selection.D_expand)
+                            cbe_new_axis = -1
+                            cbe_new_axis_start = cbe_D_before
+                            mps[imps] = expansion.C_ex
+                            mps[bond_idx + 1] = expansion.B_ex
+                            mps.qn[imps + 1] = np.concatenate([np.array(mps.qn[imps + 1]), qn_new], axis=0)
+                            r_array = expansion.R_ex
+                            environ.write("R", imps + 1, r_array)
+                            use_cbe_trim = True
+
+                shape = list(mps[imps].shape)
+                hop = hop_expr(l_array, r_array, [asxp(mpo[imps].array)], shape)
+
+                if self.evolve_config.ivp_solver == "krylov":
+                    mps_t, j = expm_krylov(
+                        lambda y: hop(y.reshape(shape)).ravel(),
+                        -1j * evolve_dt / 2, mps[imps].ravel().array
+                    )
+                else:
+                    sol = solve_ivp(
+                        lambda t, y: hop(y.reshape(shape)).ravel() / coef,
+                        (0, evolve_dt/2),
+                        mps[imps].ravel().array,
+                        method=self.evolve_config.ivp_solver,
+                        rtol=self.evolve_config.ivp_rtol,
+                        atol=self.evolve_config.ivp_atol,
+                    )
+                    mps_t, j = sol.y, sol.nfev
+
+                local_steps.append(j)
+                mps_t = mps_t.reshape(shape)
+
+                if use_cbe_trim:
+                    mps_t_np = asnumpy(mps_t)
+                    if cbe_new_axis == 0:
+                        new_sector = mps_t_np[cbe_new_axis_start:, ...]
+                    else:
+                        new_sector = mps_t_np[..., cbe_new_axis_start:]
+                    new_sector_norm = np.linalg.norm(new_sector)
+                    total_local_norm = np.linalg.norm(mps_t_np)
+                    site_tensor, transfer, qnnew, discarded_weight, trim_info = _cbe_svd_trim(
+                        mps, mps_t, imps, system, self.evolve_config, required_qn=qn_new
+                    )
+                    relative_new_norm = _cbe_record_pretrim(
+                        cbe_stats, new_sector_norm, total_local_norm,
+                        trim_info["singular_values"], trim_info["keep"],
+                    )
+                    logger.info(
+                        "CBE pre-trim diagnostic: direction=%s bond=%s imps=%s "
+                        "D_before=%s D_expand=%s D_after_expand=%s "
+                        "new_sector_norm_after_evolution=%.6e "
+                        "new_sector_relative_norm_after_evolution=%.6e "
+                        "singular_values_before_trim=%s keep=%s discarded_weight=%.6e",
+                        cbe_direction, cbe_bond_idx, imps, cbe_D_before, cbe_D_expand,
+                        cbe_D_before + cbe_D_expand, new_sector_norm, relative_new_norm,
+                        np.array2string(trim_info["singular_values"], precision=8, threshold=64),
+                        trim_info["keep"], discarded_weight,
+                    )
+                    _cbe_record_discarded(cbe_stats, discarded_weight)
+                    if system == "R":
+                        vt = site_tensor.reshape(site_tensor.shape[0], -1)
+                        u = transfer
+                        qnrset = qnnew
+                    else:
+                        u = site_tensor.reshape(-1, site_tensor.shape[-1])
+                        vt = transfer
+                        qnlset = qnnew
+                else:
+                    qnbigl, qnbigr, _ = mps._get_big_qn([imps])
+                    u, qnlset, v, qnrset = svd_qn.svd_qn(
+                        asnumpy(mps_t),
+                        qnbigl,
+                        qnbigr,
+                        mps.qntot,
+                        QR=True,
+                        system=system,
+                        full_matrices=False,
+                    )
+                    vt = v.T
+
+                if not mps.to_right and imps != 0:
+                    mps[imps] = vt.reshape([-1] + shape[1:])
+                    mps.qn[imps] = qnrset
+                    mps.qnidx = imps-1
+
+                    r_array = environ.GetLR(
+                        "R", imps, mps, mpo, itensor=r_array, method="System"
+                    )
+
+                    # reverse update u site
+                    shape_u = u.shape
+                    hop_u = hop_expr(l_array, r_array, [], shape_u)
+                    if self.evolve_config.ivp_solver == "krylov":
+                        mps_t, j = expm_krylov(
+                            lambda y: hop_u(y.reshape(shape_u)).ravel(),
+                            1j * evolve_dt / 2, u.ravel()
+                        )
+                    else:
+                        sol = solve_ivp(
+                            lambda t, y: hop_u(y.reshape(shape_u)).ravel() / -coef,
+                            (0, evolve_dt/2),
+                            u.ravel(),
+                            method=self.evolve_config.ivp_solver,
+                            rtol=self.evolve_config.ivp_rtol,
+                            atol=self.evolve_config.ivp_atol,
+                        )
+                        mps_t, j = sol.y, sol.nfev
+
+                    local_steps.append(j)
+                    mps_t = mps_t.reshape(shape_u)
+
+                    mps[imps - 1] = tensordot(mps[imps - 1].array, mps_t, axes=(-1, 0),)
+
+                elif mps.to_right and imps != len(mps) - 1:
+                    mps[imps] = u.reshape(shape[:-1] + [-1])
+                    mps.qn[imps + 1] = qnlset
+                    mps.qnidx = imps+1
+
+                    l_array = environ.GetLR(
+                        "L", imps, mps, mpo, itensor=l_array, method="System"
+                    )
+
+                    # reverse update svt site
+                    shape_svt = vt.shape
+                    hop_svt = hop_expr(l_array, r_array, [], shape_svt)
+                    if self.evolve_config.ivp_solver == "krylov":
+                        mps_t, j = expm_krylov(
+                            lambda y: hop_svt(y.reshape(shape_svt)).ravel(),
+                            1j * evolve_dt / 2, vt.ravel()
+                        )
+                    else:
+                        sol = solve_ivp(
+                            lambda t, y: hop_svt(y.reshape(shape_svt)).ravel() / -coef,
+                            (0, evolve_dt/2),
+                            vt.ravel(),
+                            method=self.evolve_config.ivp_solver,
+                            rtol=self.evolve_config.ivp_rtol,
+                            atol=self.evolve_config.ivp_atol,
+                        )
+                        mps_t, j = sol.y, sol.nfev
+
+                    local_steps.append(j)
+                    mps_t = mps_t.reshape(shape_svt)
+
+                    mps[imps + 1] = tensordot(mps_t, mps[imps + 1].array, axes=(1, 0),)
+
+                else:
+                    mps[imps] = mps_t
+            mps._switch_direction()
+
+        steps_stat = stats.describe(local_steps)
+        logger.debug(f"TDVP-PS Krylov space: {steps_stat}")
+        mps.evolve_config.stat = steps_stat
+        mps.evolve_config.cbe_last_stats = _cbe_finalize_stats(cbe_stats, mps)
 
         return mps
 

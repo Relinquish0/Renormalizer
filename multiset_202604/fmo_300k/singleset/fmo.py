@@ -56,9 +56,9 @@ if __name__ == "__main__":
     
     evolve_dt = 160
     evolve_config = EvolveConfig(EvolveMethod.tdvp_ps, guess_dt=evolve_dt)
-    compress_config = CompressConfig(CompressCriteria.fixed, max_bonddim=16)
+    compress_config = CompressConfig(CompressCriteria.fixed, max_bonddim=64)
     ct = ChargeDiffusionDynamics(model, temperature=Quantity(300,"K"),evolve_config=evolve_config, compress_config=compress_config, init_electron=InitElectron.fc)
     ct.dump_dir = "./"
-    ct.job_name = 'fmo_300k_16bd_exactfalse'
+    ct.job_name = 'fmo_300k_64bd'
     ct.stop_at_edge = False
     ct.evolve(evolve_dt=evolve_dt, evolve_time=40000)

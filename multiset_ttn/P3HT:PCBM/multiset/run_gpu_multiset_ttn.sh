@@ -1,13 +1,13 @@
 #!/bin/bash
-#SBATCH --job-name=P3HT_ms_ttn_m64
+#SBATCH --job-name=P3HT_tree_m64
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --gpus-per-node=1
 #SBATCH --mem=128G
 #SBATCH -p 4V100
 #SBATCH --qos=normal
-#SBATCH --output=P3HT_ms_ttn_m64.log
-#SBATCH --error=P3HT_ms_ttn_m64.log
+#SBATCH --output=P3HT_tree_m64.log
+#SBATCH --error=P3HT_tree_m64.log
 
 source $HOME/.bashrc
 source /software/envs/anaconda3.env

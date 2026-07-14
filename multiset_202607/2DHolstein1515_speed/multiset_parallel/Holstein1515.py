@@ -1,0 +1,223 @@
+# -*- coding: utf-8 -*-
+
+"""4-rank MPI/GPU multiset MPS speed test for the 2D 15x15 Holstein model."""
+
+import os
+import sys
+import time
+
+from mpi4py import MPI
+
+
+COMM = MPI.COMM_WORLD
+RANK = COMM.Get_rank()
+SIZE = COMM.Get_size()
+
+
+def _local_rank():
+    for key in ("OMPI_COMM_WORLD_LOCAL_RANK", "SLURM_LOCALID", "MV2_COMM_WORLD_LOCAL_RANK"):
+        value = os.environ.get(key)
+        if value is not None:
+            return int(value)
+    return RANK
+
+
+def _configure_rank_gpu():
+    local_rank = _local_rank()
+    visible = os.environ.get("CUDA_VISIBLE_DEVICES")
+    if visible:
+        visible_count = len([item for item in visible.split(",") if item.strip()])
+        gpu_id = 0 if visible_count == 1 else local_rank % max(visible_count, 1)
+    else:
+        gpu_id = local_rank
+    os.environ["RENO_GPU"] = str(gpu_id)
+    return gpu_id
+
+
+GPU_ID = _configure_rank_gpu()
+
+import numpy as np
+import pandas as pd
+
+import mpi_apply_hop_patch as mpi_hop
+import mpi_expand_patch as mpi_expand
+import mpi_krylov_patch as mpi_krylov
+
+mpi_hop.install_patch()
+mpi_expand.install_patch()
+mpi_krylov.install_patch()
+
+from renormalizer.model import HolsteinModel, Mol, Phonon
+from renormalizer.mps.backend import GPU_ID as RENO_BACKEND_GPU_ID
+from renormalizer.mps.backend import USE_GPU
+from renormalizer.multiset import MultisetChargeDiffusionDynamics
+from renormalizer.utils import Quantity
+from renormalizer.utils.log import package_logger as logger
+
+
+NROW = int(os.environ.get("NROW", "15"))
+NCOL = int(os.environ.get("NCOL", "15"))
+OMEGA_0 = float(os.environ.get("OMEGA_0", "1.0"))
+J = float(os.environ.get("J", "1.0"))
+G = float(os.environ.get("G", "0.5"))
+NU_MAX = int(os.environ.get("NU_MAX", "8"))
+
+MAX_BONDDIM = int(os.environ.get("MAX_BONDDIM", "16"))
+EVOLVE_DT = float(os.environ.get("EVOLVE_DT", "0.1"))
+N_SNAPSHOTS = int(os.environ.get("N_SNAPSHOTS", "500"))
+INITIAL_SITE = os.environ.get("INITIAL_SITE")
+OUTPUT_XLSX = os.environ.get(
+    "OUTPUT_XLSX",
+    f"H{NROW}{NCOL}_2D_m{MAX_BONDDIM}_speed_parallel.xlsx",
+)
+OUTPUT_NPZ = os.environ.get(
+    "OUTPUT_NPZ",
+    f"H{NROW}{NCOL}_2D_m{MAX_BONDDIM}_speed_parallel.npz",
+)
+IF_STARTUP_SUBSTEPS = os.environ.get("IF_STARTUP_SUBSTEPS", "0").lower() not in {
+    "0",
+    "false",
+    "no",
+}
+STARTUP_SUBSTEPS_N = int(os.environ.get("STARTUP_SUBSTEPS_N", "10"))
+
+LIGHTWEIGHT_OBSERVABLES = {
+    "energy": False,
+    "r_square": False,
+    "e_occupations": True,
+    "ph_occupations": False,
+    "S_all": False,
+    "S_maxbond_eachset": False,
+    "S_maxbond": False,
+    "S_maxbond_normed": False,
+    "S_maxbond_unnormed": False,
+    "rho": False,
+    "coherent_length": False,
+    "trace": False,
+    "purity": False,
+}
+
+
+def site_index(ix, iy, ncol):
+    return ix * ncol + iy
+
+
+def build_2d_j_matrix(nrow, ncol, j, periodic=False):
+    j_matrix = np.zeros((nrow * ncol, nrow * ncol))
+
+    for ix in range(nrow):
+        for iy in range(ncol):
+            current = site_index(ix, iy, ncol)
+
+            if periodic or ix + 1 < nrow:
+                neighbor = site_index((ix + 1) % nrow, iy, ncol)
+                if neighbor != current:
+                    j_matrix[current, neighbor] = j
+                    j_matrix[neighbor, current] = j
+
+            if periodic or iy + 1 < ncol:
+                neighbor = site_index(ix, (iy + 1) % ncol, ncol)
+                if neighbor != current:
+                    j_matrix[current, neighbor] = j
+                    j_matrix[neighbor, current] = j
+
+    return j_matrix
+
+
+def build_model():
+    lam = G**2 * OMEGA_0
+    displacement = np.sqrt(2.0 * lam) / OMEGA_0
+
+    ph = Phonon.simple_phonon(
+        Quantity(OMEGA_0),
+        Quantity(displacement),
+        NU_MAX,
+    )
+    mol = Mol(Quantity(0), [ph])
+    j_matrix = build_2d_j_matrix(NROW, NCOL, J, periodic=False)
+
+    return HolsteinModel(
+        [mol] * (NROW * NCOL),
+        j_matrix,
+        scheme=2,
+    )
+
+
+def main():
+    if N_SNAPSHOTS < 1:
+        raise ValueError("N_SNAPSHOTS must be at least 1.")
+
+    initial_site = (
+        site_index(NROW // 2, NCOL // 2, NCOL)
+        if INITIAL_SITE is None
+        else int(INITIAL_SITE)
+    )
+    model = build_model()
+
+    dynamics_job = MultisetChargeDiffusionDynamics(
+        model=model,
+        max_bonddim=MAX_BONDDIM,
+        initial_site=initial_site,
+        stop_at_edge=False,
+        if_startup_substeps=IF_STARTUP_SUBSTEPS,
+        startup_substeps_n=STARTUP_SUBSTEPS_N,
+        if_rdm=False,
+        observables=LIGHTWEIGHT_OBSERVABLES,
+    )
+
+    logger.info(
+        "MPI rank: %d/%d local_gpu_request=%s backend_gpu=%s",
+        RANK,
+        SIZE,
+        GPU_ID,
+        RENO_BACKEND_GPU_ID,
+    )
+    if RANK == 0:
+        logger.info("GPU enabled: %s", USE_GPU)
+        logger.info("lattice: %d x %d (%d sites)", NROW, NCOL, NROW * NCOL)
+        logger.info("parameters: omega0=%s, J=%s, g=%s, nu_max=%d", OMEGA_0, J, G, NU_MAX)
+        logger.info("phonon local dimension: %d", NU_MAX)
+        logger.info("initial FC site: %d", initial_site)
+        logger.info("maximum bond dimension: %d", MAX_BONDDIM)
+        logger.info("evolve time step: %s", EVOLVE_DT)
+        logger.info("number of stored snapshots: %d", N_SNAPSHOTS)
+        logger.info("reduced-density and entropy observables disabled for speed test")
+        logger.info(
+            "startup substeps enabled: %s, count: %d",
+            IF_STARTUP_SUBSTEPS,
+            STARTUP_SUBSTEPS_N,
+        )
+        logger.info("output xlsx: %s", OUTPUT_XLSX)
+        logger.info("output npz: %s", OUTPUT_NPZ)
+        logger.info("0th population: %s", dynamics_job.e_occupations_array[0])
+
+    COMM.Barrier()
+    start = time.perf_counter()
+    dynamics_job.evolve(evolve_dt=EVOLVE_DT, nsteps=N_SNAPSHOTS - 1)
+    COMM.Barrier()
+    wall_time_seconds = time.perf_counter() - start
+    max_wall_time_seconds = COMM.reduce(wall_time_seconds, op=MPI.MAX, root=0)
+    mpi_expand.summarize_patch_usage()
+    mpi_krylov.summarize_patch_usage()
+    mpi_hop.summarize_patch_usage()
+
+    if RANK == 0:
+        logger.info("max wall time for evolve across ranks: %.6f seconds", max_wall_time_seconds)
+        populations = np.array(dynamics_job.e_occupations_array)
+        pd.DataFrame(populations).to_excel(OUTPUT_XLSX, index=False, header=False)
+        np.savez(
+            OUTPUT_NPZ,
+            time_series=np.array(dynamics_job.evolve_times),
+            e_occupations=populations,
+            wall_time_seconds=np.array(max_wall_time_seconds),
+            mpi_size=np.array(SIZE),
+        )
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception:
+        logger.exception("Rank %d failed; aborting MPI job.", RANK)
+        COMM.Abort(1)
+        sys.exit(1)

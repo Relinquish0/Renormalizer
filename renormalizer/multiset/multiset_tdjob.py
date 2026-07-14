@@ -19,6 +19,7 @@ from renormalizer.utils import (
     EvolveConfig,
     EvolveMethod,
     Quantity,
+    calc_vn_entropy_dm,
 )
 from renormalizer.utils.constant import mobility2au
 
@@ -52,6 +53,69 @@ def _state_bond_dims(state):
     if isinstance(state, (tuple, list)):
         return [_state_bond_dims(item) for item in state]
     return None
+
+
+def _branch_entropy_unnormed(S_normed, populations):
+    S_unnormed = []
+    for entropy, population in zip(S_normed, populations):
+        entropy = np.asarray(entropy, dtype=float)
+        population = max(float(np.real(population)), 0.0)
+        if population == 0.0:
+            S_unnormed.append(np.zeros_like(entropy, dtype=float))
+        else:
+            S_unnormed.append(population * entropy - population * np.log(population))
+    try:
+        return np.asarray(S_unnormed, dtype=float)
+    except ValueError:
+        return np.asarray(S_unnormed, dtype=object)
+
+
+def _calc_bond_entropy_multiset(state: MultisetMps, populations=None):
+    S_all_normed = []
+    S_maxbond_eachset_normed = []
+    for mps in state.msmps:
+        if len(mps) <= 1 or mps.mp_norm == 0:
+            bond_entropy = np.zeros(len(mps), dtype=float)
+        else:
+            bond_entropy = np.asarray(mps.calc_bond_entropy(), dtype=float)
+        S_all_normed.append(bond_entropy)
+        S_maxbond_eachset_normed.append(float(np.max(bond_entropy)) if len(bond_entropy) > 0 else 0.0)
+
+    try:
+        S_all_normed = np.asarray(S_all_normed, dtype=float)
+    except ValueError:
+        S_all_normed = np.asarray(S_all_normed, dtype=object)
+    S_maxbond_eachset_normed = np.asarray(S_maxbond_eachset_normed, dtype=float)
+    S_maxbond_normed = float(np.max(S_maxbond_eachset_normed)) if len(S_maxbond_eachset_normed) > 0 else 0.0
+
+    if populations is None:
+        populations = state.e_occupations_multiset
+    S_all_unnormed = _branch_entropy_unnormed(S_all_normed, populations)
+    S_maxbond_eachset_unnormed = np.asarray(
+        [float(np.max(entropy)) if len(entropy) > 0 else 0.0 for entropy in S_all_unnormed],
+        dtype=float,
+    )
+    S_maxbond_unnormed = float(np.max(S_maxbond_eachset_unnormed)) if len(S_maxbond_eachset_unnormed) > 0 else 0.0
+    return (
+        S_all_normed,
+        S_maxbond_eachset_normed,
+        S_maxbond_normed,
+        S_all_unnormed,
+        S_maxbond_eachset_unnormed,
+        S_maxbond_unnormed,
+    )
+
+
+def _calc_max_bond_entropy_multiset(state: MultisetMps):
+    return _calc_bond_entropy_multiset(state)[2]
+
+
+def _calc_electronic_entropy(rdm_el):
+    rdm_el = (rdm_el + rdm_el.conj().T) / 2
+    if np.isclose(np.trace(rdm_el), 0):
+        return 0.0
+    entropy = float(calc_vn_entropy_dm(rdm_el))
+    return 0.0 if np.isclose(entropy, 0) else entropy
 
 
 class MultisetTdJob(object):
@@ -371,6 +435,7 @@ class MultisetChargeDiffusionDynamics(MultisetTdJob):
         job_name: str = None,
         if_startup_substeps: bool = False,
         startup_substeps_n: int = 10,
+        if_rdm: bool = False,
         observables: dict = None,
     ):
         if model is None or max_bonddim is None:
@@ -390,11 +455,17 @@ class MultisetChargeDiffusionDynamics(MultisetTdJob):
         self.stop_at_edge = stop_at_edge
         self.edge_threshold = edge_threshold
         self.use_init_hint = use_init_hint
+        self.if_rdm = if_rdm
         self.observables = {
             "energy": False,
             "r_square": False,
             "e_occupations": True,
             "ph_occupations": False,
+            "S_all": True,
+            "S_maxbond_eachset": True,
+            "S_maxbond": True,
+            "S_maxbond_normed": True,
+            "S_maxbond_unnormed": True,
             "rho": False,
             "coherent_length": False,
             "trace": False,
@@ -407,6 +478,13 @@ class MultisetChargeDiffusionDynamics(MultisetTdJob):
         self.r_square_array = []
         self.e_occupations_array = []
         self.ph_occupations_array = []
+        self.S_all_array = []
+        self.S_maxbond_eachset_array = []
+        self.S_maxbond_array = []
+        self.S_maxbond_normed_array = []
+        self.S_maxbond_unnormed_array = []
+        self.rdm_el_array = []
+        self.S_el_array = []
         self.reduced_density_matrices = []
         self.coherent_length_array = []
         self.purity_array = []
@@ -546,16 +624,43 @@ class MultisetChargeDiffusionDynamics(MultisetTdJob):
         self.ms_model.set_mps(mps)
         e_occupations = mps.e_occupations_multiset
         rho = None
+        if self.if_rdm or any(self.observables[key] for key in ("rho", "coherent_length", "trace", "purity")):
+            rho = mps.rho_el()
 
         self.e_occupations_array.append(e_occupations)
+        if any(
+            self.observables[key]
+            for key in ("S_all", "S_maxbond_eachset", "S_maxbond", "S_maxbond_normed", "S_maxbond_unnormed")
+        ):
+            (
+                S_all,
+                S_maxbond_eachset,
+                S_maxbond_normed,
+                S_all_unnormed,
+                S_maxbond_eachset_unnormed,
+                S_maxbond_unnormed,
+            ) = _calc_bond_entropy_multiset(mps, e_occupations)
+            if self.observables["S_all"]:
+                self.S_all_array.append(S_all)
+            if self.observables["S_maxbond_eachset"]:
+                self.S_maxbond_eachset_array.append(S_maxbond_eachset)
+            if self.observables["S_maxbond"]:
+                self.S_maxbond_array.append(S_maxbond_normed)
+            if self.observables["S_maxbond_normed"]:
+                self.S_maxbond_normed_array.append(S_maxbond_normed)
+            if self.observables["S_maxbond_unnormed"]:
+                self.S_maxbond_unnormed_array.append(S_maxbond_unnormed)
+        if self.if_rdm:
+            rdm_el = rho.T
+            S_el = _calc_electronic_entropy(rdm_el)
+            self.rdm_el_array.append(rdm_el)
+            self.S_el_array.append(S_el)
         if self.observables["energy"]:
             self.energies.append(self.ms_model.Hamiltonian())
         if self.observables["r_square"]:
             self.r_square_array.append(_calc_r_square_multiset(e_occupations))
         if self.observables["ph_occupations"]:
             self.ph_occupations_array.append(mps.ph_occupations_multiset)
-        if any(self.observables[key] for key in ("rho", "coherent_length", "trace", "purity")):
-            rho = mps.rho_el()
         if self.observables["rho"]:
             self.reduced_density_matrices.append(rho)
         if self.observables["coherent_length"]:
@@ -566,6 +671,19 @@ class MultisetChargeDiffusionDynamics(MultisetTdJob):
             self.purity_array.append(np.trace(rho @ rho).real)
 
         logger.info(f"e occupations: {self.e_occupations_array[-1]}")
+        if self.observables["S_all"]:
+            logger.info("S_all: %s", self.S_all_array[-1])
+        if self.observables["S_maxbond_eachset"]:
+            logger.info("S_maxbond_eachset: %s", self.S_maxbond_eachset_array[-1])
+        if self.observables["S_maxbond"]:
+            logger.info("S_maxbond: %s", self.S_maxbond_array[-1])
+        if self.observables["S_maxbond_normed"]:
+            logger.info("S_maxbond_normed: %s", self.S_maxbond_normed_array[-1])
+        if self.observables["S_maxbond_unnormed"]:
+            logger.info("S_maxbond_unnormed: %s", self.S_maxbond_unnormed_array[-1])
+        if self.if_rdm:
+            logger.info("rdm_el: %s", self.rdm_el_array[-1])
+            logger.info("S_el: %s", self.S_el_array[-1])
         if self.observables["ph_occupations"]:
             logger.info(f"ph occupations: {self.ph_occupations_array[-1]}")
 
@@ -587,6 +705,19 @@ class MultisetChargeDiffusionDynamics(MultisetTdJob):
         dump_dict["temperature"] = self.temperature.as_au()
         dump_dict["time series"] = list(self.evolve_times)
         dump_dict["electron occupations array"] = self.e_occupations_array
+        if self.observables["S_all"]:
+            dump_dict["S_all"] = self.S_all_array
+        if self.observables["S_maxbond_eachset"]:
+            dump_dict["S_maxbond_eachset"] = self.S_maxbond_eachset_array
+        if self.observables["S_maxbond"]:
+            dump_dict["S_maxbond"] = self.S_maxbond_array
+        if self.observables["S_maxbond_normed"]:
+            dump_dict["S_maxbond_normed"] = self.S_maxbond_normed_array
+        if self.observables["S_maxbond_unnormed"]:
+            dump_dict["S_maxbond_unnormed"] = self.S_maxbond_unnormed_array
+        if self.if_rdm:
+            dump_dict["rdm_el"] = self.rdm_el_array
+            dump_dict["S_el"] = self.S_el_array
         if self.observables["energy"]:
             dump_dict["energy array"] = self.energies
         if self.observables["r_square"]:

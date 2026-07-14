@@ -65,7 +65,7 @@ class VibronicModelDynamics(TdMpsJob):
         init_mp.compress_config = self.compress_config
         init_mp.evolve_config = self.evolve_config
         init_mp.model = self.model
-        if self.evolve_config.is_tdvp and self.auto_expand:
+        if self.evolve_config.is_tdvp and self.auto_expand and getattr(self.evolve_config, "expansion_method", "krylov") == "krylov":
             init_mp = init_mp.expand_bond_dimension(self.h_mpo, include_ex=False)
         return init_mp
 

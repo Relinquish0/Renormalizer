@@ -40,6 +40,17 @@ def build_initial_ms_ttns(ms_model, basis_tree, initial_site=0):
     return MsTTNS.from_ttns_list(components)
 
 
+def calc_observables(ms_ttns, istep):
+    time_start = time.perf_counter()
+    pop = ms_ttns.population()
+    bond_entropy = ms_ttns.calc_bond_entropy()
+    S_maxbond = float(np.max(bond_entropy))
+    rdm_el = ms_ttns.rdm_el()
+    S_el = float(ms_ttns.calc_electronic_entropy(rdm_el))
+    logger.info("profile observables step=%d seconds=%.6f", istep, time.perf_counter() - time_start)
+    return pop, S_maxbond, rdm_el, S_el
+
+
 def run(job_name="p3ht_ms_ttn", max_bond_dim=32, dt_fs=1.0, total_fs=200.0, initial_site=0):
     model = P3HTPCBMModel()
     evolve_config = EvolveConfig(EvolveMethod.tdvp_ps, guess_dt=Quantity(dt_fs, "fs").as_au())
@@ -68,30 +79,46 @@ def run(job_name="p3ht_ms_ttn", max_bond_dim=32, dt_fs=1.0, total_fs=200.0, init
     step_au = Quantity(dt_fs, "fs").as_au()
     nsteps = int(round(total_fs / dt_fs))
     times_fs = [0.0]
-    time_start = time.perf_counter()
-    pop = ms_ttns.population()
-    logger.info("profile population step=%d seconds=%.6f", 0, time.perf_counter() - time_start)
+    pop, S_maxbond, rdm_el, S_el = calc_observables(ms_ttns, 0)
     occupations = [pop]
+    S_maxbonds = [S_maxbond]
+    rdm_els = [rdm_el]
+    S_els = [S_el]
     bond_dims = [ms_ttns.bond_dims]
-    logger.info("step=%d time_fs=%.6f e_occupations=%s", 0, times_fs[-1], np.array2string(occupations[-1], precision=8))
+    logger.info(
+        "step=%d time_fs=%.6f e_occupations=%s S_maxbond=%.12g S_el=%.12g rdm_el=%s",
+        0,
+        times_fs[-1],
+        np.array2string(occupations[-1], precision=8),
+        S_maxbonds[-1],
+        S_els[-1],
+        np.array2string(rdm_els[-1], precision=8),
+    )
 
     for istep in range(1, nsteps + 1):
         ms_ttns.evolve_config = EvolveConfig(EvolveMethod.tdvp_ps, guess_dt=step_au)
         ms_ttns = ms_ttns.evolve(ms_ttno, step_au, normalize=True)
         times_fs.append(times_fs[-1] + dt_fs)
-        time_start = time.perf_counter()
-        pop = ms_ttns.population()
-        logger.info("profile population step=%d seconds=%.6f", istep, time.perf_counter() - time_start)
+        pop, S_maxbond, rdm_el, S_el = calc_observables(ms_ttns, istep)
         occupations.append(pop)
+        S_maxbonds.append(S_maxbond)
+        rdm_els.append(rdm_el)
+        S_els.append(S_el)
         bond_dims.append(ms_ttns.bond_dims)
         logger.info(
-            "step=%d time_fs=%.6f e_occupations=%s",
+            "step=%d time_fs=%.6f e_occupations=%s S_maxbond=%.12g S_el=%.12g rdm_el=%s",
             istep,
             times_fs[-1],
             np.array2string(occupations[-1], precision=8),
+            S_maxbonds[-1],
+            S_els[-1],
+            np.array2string(rdm_els[-1], precision=8),
         )
 
     occupations = np.asarray(occupations, dtype=float)
+    S_maxbonds = np.asarray(S_maxbonds, dtype=float)
+    rdm_els = np.asarray(rdm_els)
+    S_els = np.asarray(S_els, dtype=float)
     out_path = Path(__file__).with_name(f"{job_name}_{max_bond_dim}.npz")
     np.savez(
         out_path,
@@ -101,6 +128,9 @@ def run(job_name="p3ht_ms_ttn", max_bond_dim=32, dt_fs=1.0, total_fs=200.0, init
         le_occupations=occupations[:, :N_OT],
         cs_occupations=occupations[:, N_OT:],
         le1_occupation=occupations[:, 0],
+        S_maxbond=S_maxbonds,
+        rdm_el=rdm_els,
+        S_el=S_els,
         bond_dims=np.asarray(bond_dims, dtype=object),
         active_pairs=np.asarray(ms_ttno.active_pairs_index, dtype=int),
     )

@@ -114,6 +114,7 @@ def run(job_name="p3ht_multiset", max_bond_dim=64, dt_fs=1.0, total_fs=200.0):
         evolve_config=evolve_config,
         initial_site=0,
         stop_at_edge=False,
+        if_rdm=True,
         dump_dir=str(Path(__file__).parent),
         job_name=job_name + "_" + str(max_bond_dim),
         observables={"ph_occupations": False},
@@ -133,6 +134,11 @@ def run(job_name="p3ht_multiset", max_bond_dim=64, dt_fs=1.0, total_fs=200.0):
         le1_occupation=e_occ[:, 0],
         ph_occupations=np.array(job.ph_occupations_array),
         energies=np.array(job.energies),
+        S_maxbond=np.array(job.S_maxbond_array),
+        S_maxbond_normed=np.array(job.S_maxbond_normed_array),
+        S_maxbond_unnormed=np.array(job.S_maxbond_unnormed_array),
+        rdm_el=np.array(job.rdm_el_array),
+        S_el=np.array(job.S_el_array),
     )
     return out_path
 

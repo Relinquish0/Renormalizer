@@ -59,7 +59,7 @@ if __name__ == "__main__":
     mol_arangement = np.array([7, 5, 3, 1, 2, 4, 6]) - 1
     model = HolsteinModel(list(np.array(mlist)[mol_arangement]), j_matrix_au[mol_arangement][:, mol_arangement], )
 
-    max_bonddim = int(os.environ.get("MAX_BONDDIM", 16))
+    max_bonddim = int(os.environ.get("MAX_BONDDIM", 256))
     evolve_dt = float(os.environ.get("EVOLVE_DT", 160))
     evolve_time = float(os.environ.get("EVOLVE_TIME", 40000))
     dynamics_job = MultisetChargeDiffusionDynamics(
