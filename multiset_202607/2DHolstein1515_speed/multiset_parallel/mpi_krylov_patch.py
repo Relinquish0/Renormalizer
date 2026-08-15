@@ -1,11 +1,15 @@
 # -*- coding: utf-8 -*-
 
-"""MPI-synchronized Krylov patch for the local multiset benchmark.
+"""MPI-synchronized Krylov solvers for the multiset benchmark.
 
-The MPI _apply_hop_batched patch contains collectives inside the Krylov
-matrix-vector function. Therefore every rank must make the same Krylov
-loop/return decisions, otherwise later collectives can be entered with
-different vector sizes.
+``distributed`` preserves the original correctness baseline: Lanczos basis
+vectors are sharded, but every matrix action gathers its full input and the
+Hamiltonian action returns a slice through ``Reduce_scatter``.
+
+``local`` keeps complete electronic rows on each rank and passes those local
+rows directly to the Hamiltonian action.  Only sparse electronic halo rows
+are exchanged by :mod:`mpi_apply_hop_patch`; a full vector is gathered once,
+when a Krylov solve returns to the unchanged TDVP caller.
 """
 
 import os
@@ -31,6 +35,8 @@ class _MpiKrylovContext:
     mode: str
     calls: int = 0
     distributed_calls: int = 0
+    local_slice_calls: int = 0
+    missing_metadata_fallbacks: int = 0
     gathered_input_vectors: int = 0
     gathered_result_vectors: int = 0
     beta_any_returns: int = 0
@@ -83,11 +89,33 @@ def _partition_counts(n):
     return counts, displs
 
 
-def _local_bounds(n):
-    counts, displs = _partition_counts(n)
+def _partition_vector(n, vector_block_count=None):
+    """Partition a vector, preserving logical blocks when metadata is given."""
+    if vector_block_count is None:
+        counts, displs = _partition_counts(n)
+        return counts, displs, None, None, None
+
+    vector_block_count = int(vector_block_count)
+    if vector_block_count < 1:
+        raise ValueError("vector_block_count must be positive")
+    if n % vector_block_count != 0:
+        raise ValueError(
+            "Krylov vector length is not divisible by vector_block_count: "
+            f"length={n} blocks={vector_block_count}"
+        )
+    vector_dim = n // vector_block_count
+    electron_counts, electron_displs = _partition_counts(vector_block_count)
+    counts = electron_counts * vector_dim
+    displs = electron_displs * vector_dim
+    return counts, displs, electron_counts, electron_displs, vector_dim
+
+
+def _local_bounds(n, vector_block_count=None):
+    layout = _partition_vector(n, vector_block_count)
+    counts, displs = layout[:2]
     start = int(displs[_CTX.rank])
     stop = start + int(counts[_CTX.rank])
-    return counts, displs, start, stop
+    return layout + (start, stop)
 
 
 def _to_numpy(array):
@@ -101,17 +129,21 @@ def _mpi_dtype(array):
 
 
 def _allgatherv_xp(local, counts, displs):
-    if _CTX.mode in {"distributed", "dist", "sharded"} and USE_GPU:
-        allreduce_mode = os.environ.get("RENO_MPI_ALLREDUCE_MODE", "host").lower()
-        if allreduce_mode == "cuda":
-            local_gpu = xp.ascontiguousarray(local)
-            full_gpu = xp.empty(int(np.sum(counts)), dtype=local_gpu.dtype)
-            _CTX.comm.Allgatherv(
-                local_gpu,
-                [full_gpu, counts.astype(int).tolist(), displs.astype(int).tolist(), _mpi_dtype(full_gpu)],
-            )
-            _CTX.gathered_input_vectors += 1
-            return full_gpu
+    allreduce_mode = os.environ.get("RENO_MPI_ALLREDUCE_MODE", "host").lower()
+    if USE_GPU and allreduce_mode == "cuda":
+        local_gpu = xp.ascontiguousarray(local)
+        full_gpu = xp.empty(int(np.sum(counts)), dtype=local_gpu.dtype)
+        _CTX.comm.Allgatherv(
+            local_gpu,
+            [
+                full_gpu,
+                counts.astype(int).tolist(),
+                displs.astype(int).tolist(),
+                _mpi_dtype(full_gpu),
+            ],
+        )
+        _CTX.gathered_input_vectors += 1
+        return full_gpu
 
     local_np = np.ascontiguousarray(_to_numpy(local))
     full_np = np.empty(int(np.sum(counts)), dtype=local_np.dtype)
@@ -158,7 +190,13 @@ def _expm_krylov_local(alpha, beta, V_local, nrmv, dt):
     return V_local[: len(coeff)].T @ coeff
 
 
-def expm_krylov_sync(Afunc, dt, vstart: xp.ndarray, block_size=50):
+def expm_krylov_sync(
+    Afunc,
+    dt,
+    vstart: xp.ndarray,
+    block_size=50,
+    vector_block_count=None,
+):
     """MPI-safe version of renormalizer.lib.krylov.krylov.expm_krylov."""
     if not np.iscomplex(dt):
         dt = dt.real
@@ -221,13 +259,19 @@ def expm_krylov_sync(Afunc, dt, vstart: xp.ndarray, block_size=50):
         V[j + 1] = w / beta[j]
 
 
-def expm_krylov_distributed(Afunc, dt, vstart: xp.ndarray, block_size=50):
+def expm_krylov_distributed(
+    Afunc,
+    dt,
+    vstart: xp.ndarray,
+    block_size=50,
+    vector_block_count=None,
+    local_afunc=False,
+):
     """Krylov solver with Lanczos basis vectors sharded across MPI ranks.
 
-    Afunc still consumes a full vector because Renormalizer's local TDVP
-    interface is not distributed. The memory-heavy Krylov basis V is sharded,
-    and mpi_apply_hop_patch returns only each rank's output slice through
-    Reduce_scatter while this solver is active.
+    In compatibility mode Afunc consumes a gathered full vector and returns a
+    local slice.  With ``local_afunc=True`` it consumes and returns only the
+    complete electronic rows owned by this rank.
     """
     if not np.iscomplex(dt):
         dt = dt.real
@@ -235,7 +279,19 @@ def expm_krylov_distributed(Afunc, dt, vstart: xp.ndarray, block_size=50):
     vstart = xp.asarray(vstart)
     global_len = len(vstart)
     _check_common_length(global_len)
-    counts, displs, start, stop = _local_bounds(global_len)
+    (
+        counts,
+        displs,
+        electron_counts,
+        electron_displs,
+        vector_dim,
+        start,
+        stop,
+    ) = _local_bounds(global_len, vector_block_count)
+    if local_afunc and electron_counts is None:
+        raise ValueError(
+            "MPI local Krylov mode requires vector_block_count metadata"
+        )
     local_count = int(counts[_CTX.rank])
 
     vstart_local = vstart[start:stop].copy()
@@ -253,16 +309,27 @@ def expm_krylov_distributed(Afunc, dt, vstart: xp.ndarray, block_size=50):
 
     _CTX.calls += 1
     _CTX.distributed_calls += 1
+    if local_afunc:
+        _CTX.local_slice_calls += 1
     _CTX.max_global_len = max(_CTX.max_global_len, int(global_len))
     _CTX.max_local_len = max(_CTX.max_local_len, int(local_count))
     _CTX.max_basis_rows = max(_CTX.max_basis_rows, int(len(V_local)))
-    mpi_hop.set_output_counts(counts)
+    mpi_hop.set_distributed_layout(
+        counts,
+        mode="local" if local_afunc else "reduce_scatter",
+        electron_counts=electron_counts if local_afunc else None,
+        electron_displs=electron_displs if local_afunc else None,
+        vector_dim=vector_dim if local_afunc else None,
+    )
 
     try:
         for j in range(global_len):
-            v_full = _allgatherv_xp(V_local[j], counts, displs)
-            w_local = Afunc(v_full)
-            del v_full
+            if local_afunc:
+                w_local = Afunc(V_local[j])
+            else:
+                v_full = _allgatherv_xp(V_local[j], counts, displs)
+                w_local = Afunc(v_full)
+                del v_full
             if len(w_local) != local_count:
                 raise RuntimeError(
                     "Distributed Krylov expected local Afunc output length "
@@ -311,13 +378,56 @@ def expm_krylov_distributed(Afunc, dt, vstart: xp.ndarray, block_size=50):
 
             V_local[j + 1] = w_local / beta[j]
     finally:
-        mpi_hop.set_output_counts(None)
+        mpi_hop.set_distributed_layout(None, mode="none")
 
 
-def expm_krylov_mpi(Afunc, dt, vstart: xp.ndarray, block_size=50):
-    if _CTX.mode in {"distributed", "dist", "sharded"} and _CTX.size > 1:
-        return expm_krylov_distributed(Afunc, dt, vstart, block_size=block_size)
-    return expm_krylov_sync(Afunc, dt, vstart, block_size=block_size)
+def expm_krylov_mpi(
+    Afunc,
+    dt,
+    vstart: xp.ndarray,
+    block_size=50,
+    vector_block_count=None,
+):
+    if vector_block_count is None:
+        vector_block_count = getattr(Afunc, "_reno_vector_block_count", None)
+    if _CTX.size > 1 and _CTX.mode in {"local", "halo", "local_slice"}:
+        if vector_block_count is None:
+            _CTX.missing_metadata_fallbacks += 1
+            if _CTX.rank == 0 and _CTX.missing_metadata_fallbacks == 1:
+                logger.warning(
+                    "MPI local Krylov received an untagged Afunc; falling back "
+                    "to replicated synchronized Krylov for compatibility."
+                )
+            return expm_krylov_sync(
+                Afunc,
+                dt,
+                vstart,
+                block_size=block_size,
+            )
+        return expm_krylov_distributed(
+            Afunc,
+            dt,
+            vstart,
+            block_size=block_size,
+            vector_block_count=vector_block_count,
+            local_afunc=True,
+        )
+    if _CTX.size > 1 and _CTX.mode in {"distributed", "dist", "sharded"}:
+        return expm_krylov_distributed(
+            Afunc,
+            dt,
+            vstart,
+            block_size=block_size,
+            vector_block_count=vector_block_count,
+            local_afunc=False,
+        )
+    return expm_krylov_sync(
+        Afunc,
+        dt,
+        vstart,
+        block_size=block_size,
+        vector_block_count=vector_block_count,
+    )
 
 
 def install_patch():
@@ -333,6 +443,8 @@ def summarize_patch_usage():
         [
             _CTX.calls,
             _CTX.distributed_calls,
+            _CTX.local_slice_calls,
+            _CTX.missing_metadata_fallbacks,
             _CTX.gathered_input_vectors,
             _CTX.gathered_result_vectors,
             _CTX.beta_any_returns,
@@ -346,12 +458,14 @@ def summarize_patch_usage():
     )
     gathered = None
     if _CTX.rank == 0:
-        gathered = np.empty((_CTX.size, 10), dtype=np.int64)
+        gathered = np.empty((_CTX.size, 12), dtype=np.int64)
     _CTX.comm.Gather(values, gathered, root=0)
     if _CTX.rank == 0:
         logger.info(
             "MPI Krylov usage by rank "
-            "[calls, distributed_calls, gathered_input_vectors, gathered_result_vectors, "
+            "[calls, distributed_calls, local_slice_calls, "
+            "missing_metadata_fallbacks, gathered_input_vectors, "
+            "gathered_result_vectors, "
             "beta_any_returns, converged_all_returns, full_space_returns, "
             "max_global_len, max_local_len, max_basis_rows]: %s",
             gathered.tolist(),

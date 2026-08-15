@@ -534,6 +534,7 @@ class MultisetModel:
                     [asxp(ms_mps.msmps[a][imps].array).reshape(dim) for a in range(self.N_electron)]
                 ).reshape(-1)
                 ivp_eq = lambda Y: self._apply_hop_batched(Y, batched_data, dim, shape_imps)
+                ivp_eq._reno_vector_block_count = self.N_electron
                 if self.evolve_config.ivp_solver == "krylov":
                     mps_t, j = expm_krylov(ivp_eq, -1j * evolve_dt / 2, Y0)
 
@@ -584,6 +585,7 @@ class MultisetModel:
 
                     if self.evolve_config.ivp_solver == "krylov":
                         ivp_eq_Ut = lambda Y: self._apply_hop_batched(Y, batched_u, dimU, shapeU)
+                        ivp_eq_Ut._reno_vector_block_count = self.N_electron
                         Ut, j2 = expm_krylov(ivp_eq_Ut, 1j * evolve_dt / 2, U0)
 
                     local_steps.append(j2)
@@ -624,6 +626,7 @@ class MultisetModel:
                     batched_c = self._build_reverse_batched_data(l_array_c, r_array_ab)
                     C0 = vt_batch.reshape(self.N_electron, dimC).reshape(-1)
                     ivp_eq_Ct = lambda Y: self._apply_hop_batched(Y, batched_c, dimC, shapeC)
+                    ivp_eq_Ct._reno_vector_block_count = self.N_electron
                     if self.evolve_config.ivp_solver == "krylov":
                         Ct, j2 = expm_krylov(ivp_eq_Ct, 1j * evolve_dt / 2, C0)
 

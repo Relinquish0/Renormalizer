@@ -144,6 +144,8 @@ def build_model():
 
 
 def main():
+    if NROW < 1 or NCOL < 1:
+        raise ValueError("NROW and NCOL must both be positive.")
     if N_SNAPSHOTS < 1:
         raise ValueError("N_SNAPSHOTS must be at least 1.")
 
@@ -152,6 +154,10 @@ def main():
         if INITIAL_SITE is None
         else int(INITIAL_SITE)
     )
+    if not 0 <= initial_site < NROW * NCOL:
+        raise ValueError(
+            f"INITIAL_SITE must be in [0, {NROW * NCOL}); got {initial_site}."
+        )
     model = build_model()
 
     dynamics_job = MultisetChargeDiffusionDynamics(
