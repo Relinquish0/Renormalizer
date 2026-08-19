@@ -1,0 +1,54 @@
+[
+  {
+    "lattice": "28x28",
+    "ranks": 4,
+    "n_electron": 784,
+    "vector_len": 25690112,
+    "local_len": 6422528,
+    "local_fraction": 0.25,
+    "analytic_local_basis_gb": 4.785,
+    "analytic_full_basis_gb": 19.141,
+    "lanczos_iters": 17,
+    "peak_before_gb": 0.431,
+    "measured_peak_gb": 6.173
+  },
+  {
+    "lattice": "32x32",
+    "ranks": 4,
+    "n_electron": 1024,
+    "vector_len": 33554432,
+    "local_len": 8388608,
+    "local_fraction": 0.25,
+    "analytic_local_basis_gb": 6.25,
+    "analytic_full_basis_gb": 25.0,
+    "lanczos_iters": 17,
+    "peak_before_gb": 0.563,
+    "measured_peak_gb": 8.063
+  },
+  {
+    "lattice": "36x36",
+    "ranks": 4,
+    "n_electron": 1296,
+    "vector_len": 42467328,
+    "local_len": 10616832,
+    "local_fraction": 0.25,
+    "analytic_local_basis_gb": 7.91,
+    "analytic_full_basis_gb": 31.641,
+    "lanczos_iters": 17,
+    "peak_before_gb": 0.712,
+    "measured_peak_gb": 10.204
+  },
+  {
+    "lattice": "40x40",
+    "ranks": 4,
+    "n_electron": 1600,
+    "vector_len": 52428800,
+    "local_len": 13107200,
+    "local_fraction": 0.25,
+    "analytic_local_basis_gb": 9.766,
+    "analytic_full_basis_gb": 39.062,
+    "lanczos_iters": 17,
+    "peak_before_gb": 0.879,
+    "measured_peak_gb": 12.598
+  }
+]

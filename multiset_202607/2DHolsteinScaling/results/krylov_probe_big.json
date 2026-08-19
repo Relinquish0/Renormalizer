@@ -1,0 +1,41 @@
+[
+  {
+    "lattice": "22x22",
+    "n_electron": 484,
+    "site_dim": 32768,
+    "vector_len": 15859712,
+    "one_vector_gb": 0.2363,
+    "analytic_basis_gb": 11.816,
+    "lanczos_iters": 17,
+    "inputs_gb": 0.354,
+    "measured_peak_gb": 13.707,
+    "solver_only_gb": 13.353,
+    "overhead_vs_basis": 1.13
+  },
+  {
+    "lattice": "25x25",
+    "n_electron": 625,
+    "site_dim": 32768,
+    "vector_len": 20480000,
+    "one_vector_gb": 0.3052,
+    "analytic_basis_gb": 15.259,
+    "lanczos_iters": 17,
+    "inputs_gb": 0.458,
+    "measured_peak_gb": 17.7,
+    "solver_only_gb": 17.242,
+    "overhead_vs_basis": 1.13
+  },
+  {
+    "lattice": "28x28",
+    "n_electron": 784,
+    "site_dim": 32768,
+    "vector_len": 25690112,
+    "one_vector_gb": 0.3828,
+    "analytic_basis_gb": 19.141,
+    "lanczos_iters": 17,
+    "inputs_gb": 0.574,
+    "measured_peak_gb": 22.203,
+    "solver_only_gb": 21.629,
+    "overhead_vs_basis": 1.13
+  }
+]

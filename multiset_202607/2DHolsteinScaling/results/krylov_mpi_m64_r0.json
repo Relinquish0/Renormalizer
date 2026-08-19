@@ -1,0 +1,41 @@
+[
+  {
+    "lattice": "15x15",
+    "ranks": 4,
+    "n_electron": 225,
+    "vector_len": 7372800,
+    "local_len": 1867776,
+    "local_fraction": 0.2533,
+    "analytic_local_basis_gb": 1.392,
+    "analytic_full_basis_gb": 5.493,
+    "lanczos_iters": 17,
+    "peak_before_gb": 0.124,
+    "measured_peak_gb": 1.792
+  },
+  {
+    "lattice": "20x20",
+    "ranks": 4,
+    "n_electron": 400,
+    "vector_len": 13107200,
+    "local_len": 3276800,
+    "local_fraction": 0.25,
+    "analytic_local_basis_gb": 2.441,
+    "analytic_full_basis_gb": 9.766,
+    "lanczos_iters": 17,
+    "peak_before_gb": 0.22,
+    "measured_peak_gb": 3.149
+  },
+  {
+    "lattice": "25x25",
+    "ranks": 4,
+    "n_electron": 625,
+    "vector_len": 20480000,
+    "local_len": 5144576,
+    "local_fraction": 0.2512,
+    "analytic_local_basis_gb": 3.833,
+    "analytic_full_basis_gb": 15.259,
+    "lanczos_iters": 17,
+    "peak_before_gb": 0.344,
+    "measured_peak_gb": 4.942
+  }
+]

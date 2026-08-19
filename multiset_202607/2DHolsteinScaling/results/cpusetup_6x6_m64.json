@@ -1,0 +1,86 @@
+{
+  "gpu_dev_total_gb": 23.673,
+  "gpu_pool_peak_gb": 0.015,
+  "host_peak_gb": 0.922,
+  "krylov_basis_gb": 0.879,
+  "krylov_vector_gb": 0.0176,
+  "max_bonddim": 64,
+  "n_active_pairs": 156,
+  "n_sites": 36,
+  "ncol": 6,
+  "note": "setup only",
+  "nrow": 6,
+  "nsteps": 10,
+  "nu_max": 8,
+  "phases": [
+    {
+      "gpu_dev_total_gb": 23.673,
+      "gpu_dev_used_gb": 0.214,
+      "gpu_pool_peak_gb": 0.0,
+      "gpu_pool_used_gb": 0.0,
+      "host_peak_gb": 0.372100830078125,
+      "phase": "build_model",
+      "seconds": 0.019802980998065323
+    },
+    {
+      "gpu_dev_total_gb": 23.673,
+      "gpu_dev_used_gb": 0.214,
+      "gpu_pool_peak_gb": 0.0,
+      "gpu_pool_used_gb": 0.0,
+      "host_peak_gb": 0.377471923828125,
+      "phase": "ConstructMsModel",
+      "seconds": 0.08475038500182563
+    },
+    {
+      "gpu_dev_total_gb": 23.673,
+      "gpu_dev_used_gb": 0.214,
+      "gpu_pool_peak_gb": 0.0,
+      "gpu_pool_used_gb": 0.0,
+      "host_peak_gb": 0.421417236328125,
+      "phase": "ConstructMsMpo",
+      "seconds": 1.64600729799713
+    },
+    {
+      "gpu_dev_total_gb": 23.673,
+      "gpu_dev_used_gb": 0.225,
+      "gpu_pool_peak_gb": 0.011,
+      "gpu_pool_used_gb": 0.006,
+      "host_peak_gb": 0.4471092224121094,
+      "phase": "select_grouping",
+      "seconds": 0.3309295670042047
+    },
+    {
+      "gpu_dev_total_gb": 23.673,
+      "gpu_dev_used_gb": 0.233,
+      "gpu_pool_peak_gb": 0.011,
+      "gpu_pool_used_gb": 0.006,
+      "host_peak_gb": 0.5696678161621094,
+      "phase": "select_grouping",
+      "seconds": 4.561936793994391
+    },
+    {
+      "gpu_dev_total_gb": 23.673,
+      "gpu_dev_used_gb": 0.237,
+      "gpu_pool_peak_gb": 0.015,
+      "gpu_pool_used_gb": 0.006,
+      "host_peak_gb": 0.9219017028808594,
+      "phase": "expand_bond_dim",
+      "seconds": 46.82444570600637
+    },
+    {
+      "gpu_dev_total_gb": 23.673,
+      "gpu_dev_used_gb": 0.237,
+      "gpu_pool_peak_gb": 0.015,
+      "gpu_pool_used_gb": 0.006,
+      "host_peak_gb": 0.9219017028808594,
+      "phase": "job_ready",
+      "seconds": 1.3750563239955227
+    }
+  ],
+  "scatter_S_gb": 0.002,
+  "stacked_W_gb": 0.004,
+  "status": "ok",
+  "steps_completed": 0,
+  "tag": "cpusetup_6x6_m64",
+  "widest_site_dim": 32768
+}

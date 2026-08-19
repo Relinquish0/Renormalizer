@@ -1,0 +1,105 @@
+{
+  "gpu_dev_total_gb": 23.673,
+  "gpu_pool_peak_gb": 0.651,
+  "host_peak_gb": 1.031,
+  "krylov_basis_gb": 0.391,
+  "krylov_vector_gb": 0.0078,
+  "max_bonddim": 64,
+  "n_active_pairs": 64,
+  "n_sites": 16,
+  "ncol": 4,
+  "note": "",
+  "nrow": 4,
+  "nsteps": 2,
+  "nu_max": 8,
+  "phases": [
+    {
+      "gpu_dev_total_gb": 23.673,
+      "gpu_dev_used_gb": 1.269,
+      "gpu_pool_peak_gb": 0.0,
+      "gpu_pool_used_gb": 0.0,
+      "host_peak_gb": 0.3721466064453125,
+      "phase": "build_model",
+      "seconds": 0.0042944409942720085
+    },
+    {
+      "gpu_dev_total_gb": 23.673,
+      "gpu_dev_used_gb": 1.269,
+      "gpu_pool_peak_gb": 0.0,
+      "gpu_pool_used_gb": 0.0,
+      "host_peak_gb": 0.3731231689453125,
+      "phase": "ConstructMsModel",
+      "seconds": 0.01639080400491366
+    },
+    {
+      "gpu_dev_total_gb": 23.673,
+      "gpu_dev_used_gb": 1.269,
+      "gpu_pool_peak_gb": 0.0,
+      "gpu_pool_used_gb": 0.0,
+      "host_peak_gb": 0.3838653564453125,
+      "phase": "ConstructMsMpo",
+      "seconds": 0.4649638420014526
+    },
+    {
+      "gpu_dev_total_gb": 23.673,
+      "gpu_dev_used_gb": 1.271,
+      "gpu_pool_peak_gb": 0.002,
+      "gpu_pool_used_gb": 0.001,
+      "host_peak_gb": 0.4033355712890625,
+      "phase": "select_grouping",
+      "seconds": 0.14009708300000057
+    },
+    {
+      "gpu_dev_total_gb": 23.673,
+      "gpu_dev_used_gb": 1.279,
+      "gpu_pool_peak_gb": 0.002,
+      "gpu_pool_used_gb": 0.001,
+      "host_peak_gb": 0.4931793212890625,
+      "phase": "select_grouping",
+      "seconds": 1.2969198879945907
+    },
+    {
+      "gpu_dev_total_gb": 23.673,
+      "gpu_dev_used_gb": 1.284,
+      "gpu_pool_peak_gb": 0.006,
+      "gpu_pool_used_gb": 0.001,
+      "host_peak_gb": 0.5927391052246094,
+      "phase": "expand_bond_dim",
+      "seconds": 9.995105498004705
+    },
+    {
+      "gpu_dev_total_gb": 23.673,
+      "gpu_dev_used_gb": 1.284,
+      "gpu_pool_peak_gb": 0.006,
+      "gpu_pool_used_gb": 0.001,
+      "host_peak_gb": 0.5927391052246094,
+      "phase": "job_ready",
+      "seconds": 0.38486400499823503
+    },
+    {
+      "gpu_dev_total_gb": 23.673,
+      "gpu_dev_used_gb": 1.976,
+      "gpu_pool_peak_gb": 0.651,
+      "gpu_pool_used_gb": 0.001,
+      "host_peak_gb": 0.97332763671875,
+      "phase": "step_1",
+      "seconds": 8.107697886996903
+    },
+    {
+      "gpu_dev_total_gb": 23.673,
+      "gpu_dev_used_gb": 1.976,
+      "gpu_pool_peak_gb": 0.651,
+      "gpu_pool_used_gb": 0.001,
+      "host_peak_gb": 1.03094482421875,
+      "phase": "step_2",
+      "seconds": 6.338036565000948
+    }
+  ],
+  "population_sum": 1.0,
+  "scatter_S_gb": 0.0,
+  "stacked_W_gb": 0.001,
+  "status": "ok",
+  "steps_completed": 2,
+  "tag": "smokestep_4x4_1gpu",
+  "widest_site_dim": 32768
+}

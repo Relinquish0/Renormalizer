@@ -1,0 +1,19 @@
+{
+  "effective_gib_per_s": 0.43,
+  "host_peak_gb": 2.879,
+  "max_bonddim": 64,
+  "n_sites": 36,
+  "ncol": 6,
+  "nrow": 6,
+  "pcie_fraction_of_step": 0.14,
+  "pcie_gib_moved": 3.1,
+  "pcie_seconds": 7.23,
+  "read_bytes": 1662522240,
+  "read_calls": 22464,
+  "read_s": 1.44,
+  "step_seconds": 51.46,
+  "tag": "envtime_6x6_m64",
+  "write_bytes": 1662522240,
+  "write_calls": 22464,
+  "write_s": 5.79
+}

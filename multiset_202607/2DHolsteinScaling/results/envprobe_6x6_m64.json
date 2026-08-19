@@ -1,0 +1,51 @@
+{
+  "environ_fraction_of_growth": 0.399,
+  "environ_host_gb": 0.774,
+  "host_after_setup_gb": 0.923,
+  "host_after_step1_gb": 2.864,
+  "host_step1_growth_gb": 1.941,
+  "max_bonddim": 64,
+  "n_active_pairs": 156,
+  "n_environ_objects": 156,
+  "n_sites": 36,
+  "n_tensors": 11232,
+  "ncol": 6,
+  "nrow": 6,
+  "scatter_S_gb": 0.002,
+  "stacked_W_gb": 0.004,
+  "tag": "envprobe_6x6_m64",
+  "top_shapes_gb": [
+    [
+      [
+        64,
+        1,
+        64
+      ],
+      0.483
+    ],
+    [
+      [
+        64,
+        2,
+        64
+      ],
+      0.29
+    ],
+    [
+      [
+        8,
+        1,
+        8
+      ],
+      0.0
+    ],
+    [
+      [
+        8,
+        2,
+        8
+      ],
+      0.0
+    ]
+  ]
+}
