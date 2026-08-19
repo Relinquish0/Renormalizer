@@ -54,7 +54,7 @@ class SpinBosonDynamics(TdMpsJob):
         init_mps.compress_config = self.compress_config
         init_mps.evolve_config = self.evolve_config
         
-        if self.evolve_config.is_tdvp and self.auto_expand and getattr(self.evolve_config, "expansion_method", "krylov") == "krylov": 
+        if self.evolve_config.is_tdvp and self.auto_expand: 
             init_mps = init_mps.expand_bond_dimension(self.h_mpo, coef=1e-16, include_ex=False)
         return init_mps
 

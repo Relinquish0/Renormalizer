@@ -99,7 +99,7 @@ class SpectralFunctionZT(TdMpsJob):
         a_ket.compress_config = self.compress_config
         a_ket.evolve_config = self.evolve_config
         a_ket.normalize("mps_norm_to_coeff")
-        if self.evolve_config.is_tdvp and getattr(self.evolve_config, "expansion_method", "krylov") == "krylov":
+        if self.evolve_config.is_tdvp:
             a_ket = a_ket.expand_bond_dimension(self.h_mpo)
         return (gs, a_ket)
 

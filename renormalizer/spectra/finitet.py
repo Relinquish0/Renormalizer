@@ -139,7 +139,7 @@ class SpectraFiniteT(SpectraTdMpsJobBase):
         ket_mpo = tp.latest_mps
         ket_mpo.evolve_config = self.evolve_config
         a_ket_mpo = dipole_mpo.apply(ket_mpo, canonicalise=True)
-        if self.evolve_config.is_tdvp and getattr(self.evolve_config, "expansion_method", "krylov") == "krylov":
+        if self.evolve_config.is_tdvp:
             a_ket_mpo = a_ket_mpo.expand_bond_dimension(self.h_mpo)
         a_ket_mpo.normalize("mps_norm_to_coeff")
         a_bra_mpo = a_ket_mpo.copy()

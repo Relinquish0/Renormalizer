@@ -193,7 +193,7 @@ class ChargeDiffusionDynamics(TdMpsJob):
         logger.info(f"mpo physical dims: {self.mpo.pbond_list}")
         init_mp.evolve_config = self.evolve_config
         init_mp.compress_config = self.compress_config
-        if self.evolve_config.is_tdvp and getattr(self.evolve_config, "expansion_method", "krylov") == "krylov":
+        if self.evolve_config.is_tdvp:
             init_mp = init_mp.expand_bond_dimension(self.mpo)
         init_mp.canonicalise()
         return init_mp

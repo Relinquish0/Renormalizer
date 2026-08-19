@@ -67,16 +67,6 @@ class TdMpsJob(object):
         """
         raise NotImplementedError
 
-
-    def _sync_latest_evolve_config(self):
-        latest = self.latest_mps
-        if hasattr(latest, "evolve_config"):
-            latest.evolve_config = self.evolve_config
-        elif isinstance(latest, (list, tuple)):
-            for item in latest:
-                if hasattr(item, "evolve_config"):
-                    item.evolve_config = self.evolve_config
-
     def _run_startup_substeps(self, evolve_dt):
         abs_dt = abs(evolve_dt)
         if abs_dt == 0:
@@ -89,9 +79,6 @@ class TdMpsJob(object):
 
         for current_abs_time in substeps:
             sub_dt = phase * float(current_abs_time - previous_abs_time)
-            self.evolve_config.current_time = self.latest_evolve_time + phase * previous_abs_time
-            self.evolve_config.step_index = len(self.evolve_times)
-            self._sync_latest_evolve_config()
             new_mps = self.evolve_single_step(sub_dt)
             self.latest_mps = new_mps
             previous_abs_time = float(current_abs_time)
@@ -159,8 +146,6 @@ class TdMpsJob(object):
                 self.startup_substeps_n,
             )
 
-            self.evolve_config.current_time = self.latest_evolve_time
-            self.evolve_config.step_index = len(self.evolve_times)
             new_mps = self._run_startup_substeps(evolve_dt)
 
             self.evolve_times.append(self.latest_evolve_time + evolve_dt)
@@ -214,9 +199,6 @@ class TdMpsJob(object):
             logger.info("{} begin.".format(step_str))
             
             # evolve
-            self.evolve_config.current_time = self.latest_evolve_time
-            self.evolve_config.step_index = len(self.evolve_times)
-            self._sync_latest_evolve_config()
             new_mps = self.evolve_single_step(evolve_dt)
             
             # process

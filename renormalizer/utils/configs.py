@@ -352,24 +352,7 @@ class EvolveConfig:
         ivp_rtol=1e-5,
         ivp_atol=1e-8,
         ivp_solver="krylov",
-        force_ovlp=True,
-        expansion_method="krylov",
-        cbe_Dmax=32,
-        cbe_eps_pre=1e-4,
-        cbe_eps_final=1e-6,
-        cbe_eps_trim=1e-12,
-        cbe_max_expand=None,
-        cbe_Dpre=None,
-        cbe_debug=False,
-        cbe_warmup_time=1.0,
-        cbe_warmup_substeps=10,
-        cbe_disable_after_warmup=True,
-        cbe_lock_after_warmup=True,
-        cbe_production_dt=None,
-        cbe_warmup_dt=None,
-        cbe_path_seed=True,
-        cbe_path_seed_coef=1e-10,
-        cbe_isometry_tol=1e-8,
+        force_ovlp=True
     ):
         if isinstance(method, str):
             method = getattr(EvolveMethod, method)
@@ -401,30 +384,6 @@ class EvolveConfig:
         self.force_ovlp: bool = force_ovlp
         # auto switch between mu_vmf and vmf for a higher efficiency
         self.vmf_auto_switch: bool = True
-        if expansion_method not in ["none", "krylov", "cbe"]:
-            raise ValueError(f"Unknown expansion_method: {expansion_method}")
-        self.expansion_method = expansion_method
-        self.cbe_Dmax = cbe_Dmax
-        self.cbe_eps_pre = cbe_eps_pre
-        self.cbe_eps_final = cbe_eps_final
-        self.cbe_eps_trim = cbe_eps_trim
-        self.cbe_max_expand = cbe_max_expand
-        self.cbe_Dpre = cbe_Dpre
-        self.cbe_debug = cbe_debug
-        self.cbe_warmup_time = cbe_warmup_time
-        self.cbe_warmup_substeps = cbe_warmup_substeps
-        self.cbe_disable_after_warmup = cbe_disable_after_warmup
-        self.cbe_lock_after_warmup = cbe_lock_after_warmup
-        self.cbe_production_dt = cbe_production_dt
-        self.cbe_warmup_dt = cbe_warmup_dt
-        self.cbe_path_seed = cbe_path_seed
-        self.cbe_path_seed_coef = cbe_path_seed_coef
-        self.cbe_isometry_tol = cbe_isometry_tol
-        self.cbe_path_seed_done = False
-        self.cbe_runtime_disabled = False
-        self.current_time = 0.0
-        self.step_index = 0
-        self.cbe_last_stats = None
 
     @property
     def is_tdvp(self):
