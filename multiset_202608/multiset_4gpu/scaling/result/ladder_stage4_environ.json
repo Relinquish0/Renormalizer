@@ -1,0 +1,20 @@
+{
+  "stage": 4,
+  "ntasks": 4,
+  "max_bonddim": 64,
+  "nu_max": 8,
+  "nsteps": 1,
+  "runs": [
+    {
+      "tag": "27x27",
+      "nrow": 27,
+      "ncol": 27,
+      "n_sites": 729,
+      "exit_code": 0,
+      "status": "ok",
+      "seconds": 4397.187843084335,
+      "log": "/curie-home/zengjj/Renormalizer/multiset_4gpu/scaling/result/27x27/run_stage4_environ.log",
+      "failure_reason": null
+    }
+  ]
+}

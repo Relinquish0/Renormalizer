@@ -25,6 +25,10 @@ def _expm_krylov(alpha, beta, V, v_norm, dt):
     return V @ xp.asarray(u_hess @ (v_norm * np.exp(dt*w_hess) * u_hess[0]))
 
 
+# Increment used when the Lanczos basis has to grow past ``block_size``.
+GROWTH_STEP = 8
+
+
 def expm_krylov(Afunc, dt, vstart: xp.ndarray, block_size=50):
     """
     Compute Krylov subspace approximation of the matrix exponential
@@ -68,11 +72,15 @@ def expm_krylov(Afunc, dt, vstart: xp.ndarray, block_size=50):
             return _expm_krylov(alpha[:j+1], beta[:j], V[:j+1, :].T, nrmv, dt), j+1
 
         if len(V) == j+1:
-            V, old_V = xp.empty((len(V) + block_size, len(vstart)), dtype=vstart.dtype), V
+            # Grow in small increments: the growth path transiently holds both the
+            # old and the new basis, so a large step is worse than the original
+            # over-allocation it is meant to rescue.
+            grow = min(block_size, GROWTH_STEP)
+            V, old_V = xp.empty((len(V) + grow, len(vstart)), dtype=vstart.dtype), V
             V[:len(old_V)] = old_V
             del old_V
-            alpha = np.concatenate([alpha, np.zeros(block_size)])
-            beta = np.concatenate([beta, np.zeros(block_size)])
+            alpha = np.concatenate([alpha, np.zeros(grow)])
+            beta = np.concatenate([beta, np.zeros(grow)])
 
         w -= alpha[j]*V[j] + (beta[j-1]*V[j-1] if j > 0 else 0)
         beta[j] = xp.linalg.norm(w)

@@ -1,0 +1,45 @@
+{
+  "config": {
+    "nrow": 15,
+    "ncol": 15,
+    "n_sites": 225,
+    "omega_0": 1.0,
+    "J": 1.0,
+    "g": 0.5,
+    "nu_max": 8,
+    "max_bonddim": 64,
+    "evolve_dt": 0.1,
+    "nsteps": 1,
+    "initial_site": 112,
+    "periodic": false
+  },
+  "mpi_size": 4,
+  "shard_stage": 1,
+  "model_seconds": 0.29739302955567837,
+  "setup_seconds": 463.8740999195725,
+  "memory": [
+    {
+      "phase": "after-setup",
+      "host_peak_gb": [
+        14.852867126464844,
+        14.853675842285156,
+        14.858802795410156,
+        14.852619171142578
+      ],
+      "gpu_used_gb": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "gpu_pool_gb": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "gpu_total_gb": 0.0
+    }
+  ],
+  "status": "setup-only"
+}

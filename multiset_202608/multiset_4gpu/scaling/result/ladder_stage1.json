@@ -1,0 +1,53 @@
+{
+  "stage": 1,
+  "ntasks": 4,
+  "max_bonddim": 64,
+  "nu_max": 8,
+  "nsteps": 1,
+  "runs": [
+    {
+      "tag": "15x15",
+      "nrow": 15,
+      "ncol": 15,
+      "n_sites": 225,
+      "exit_code": 0,
+      "status": "ok",
+      "seconds": 473.4815592765808,
+      "log": "/curie-home/zengjj/Renormalizer/multiset_4gpu/scaling/result/15x15/run_stage1.log",
+      "failure_reason": null
+    },
+    {
+      "tag": "18x18",
+      "nrow": 18,
+      "ncol": 18,
+      "n_sites": 324,
+      "exit_code": 0,
+      "status": "ok",
+      "seconds": 1039.2634518146515,
+      "log": "/curie-home/zengjj/Renormalizer/multiset_4gpu/scaling/result/18x18/run_stage1.log",
+      "failure_reason": null
+    },
+    {
+      "tag": "20x20",
+      "nrow": 20,
+      "ncol": 20,
+      "n_sites": 400,
+      "exit_code": 0,
+      "status": "ok",
+      "seconds": 1706.8339576721191,
+      "log": "/curie-home/zengjj/Renormalizer/multiset_4gpu/scaling/result/20x20/run_stage1.log",
+      "failure_reason": null
+    },
+    {
+      "tag": "22x22",
+      "nrow": 22,
+      "ncol": 22,
+      "n_sites": 484,
+      "exit_code": 0,
+      "status": "ok",
+      "seconds": 2720.0216727256775,
+      "log": "/curie-home/zengjj/Renormalizer/multiset_4gpu/scaling/result/22x22/run_stage1.log",
+      "failure_reason": null
+    }
+  ]
+}

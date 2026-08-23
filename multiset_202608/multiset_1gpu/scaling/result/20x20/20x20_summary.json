@@ -1,0 +1,67 @@
+{
+  "config": {
+    "nrow": 20,
+    "ncol": 20,
+    "n_sites": 400,
+    "omega_0": 1.0,
+    "J": 1.0,
+    "g": 0.5,
+    "nu_max": 8,
+    "max_bonddim": 64,
+    "evolve_dt": 0.1,
+    "nsteps": 2,
+    "initial_site": 210,
+    "periodic": false
+  },
+  "n_gpu": 1,
+  "model_seconds": 1.0803164141252637,
+  "setup_seconds": 4546.1321721365675,
+  "evolve_seconds": 6868.545586028136,
+  "seconds_per_step": 3434.272793014068,
+  "memory": [
+    {
+      "phase": "after-setup",
+      "host_peak_gb": 50.068458557128906,
+      "host_rss_gb": 50.068458557128906,
+      "gpu_pool_used_gb": 0.6061625480651855,
+      "gpu_pool_total_gb": 1.2234573364257812,
+      "gpu_device_used_gb": 1.69287109375,
+      "gpu_device_total_gb": 31.7325439453125,
+      "mps": {
+        "n_sets": 400,
+        "total_gb": 38.69667053222656,
+        "device_gb": 0.0,
+        "host_gb": 38.69667053222656,
+        "per_set_mean_gb": 0.0967416763305664,
+        "per_set_max_gb": 0.0967416763305664,
+        "per_set_min_gb": 0.0967416763305664
+      }
+    },
+    {
+      "phase": "after-evolve",
+      "host_peak_gb": 289.7637710571289,
+      "host_rss_gb": 289.7637710571289,
+      "gpu_pool_used_gb": 0.6070780754089355,
+      "gpu_pool_total_gb": 27.081138610839844,
+      "gpu_device_used_gb": 27.46240234375,
+      "gpu_device_total_gb": 31.7325439453125,
+      "mps": {
+        "n_sets": 400,
+        "total_gb": 77.39334106445312,
+        "device_gb": 0.0,
+        "host_gb": 77.39334106445312,
+        "per_set_mean_gb": 0.1934833526611328,
+        "per_set_max_gb": 0.1934833526611328,
+        "per_set_min_gb": 0.1934833526611328
+      },
+      "environ": {
+        "n_environ": 1920,
+        "total_gb": 112.44051933288574,
+        "device_gb": 0.0,
+        "host_gb": 112.44051933288574,
+        "per_pair_mean_gb": 0.05856277048587799
+      }
+    }
+  ],
+  "status": "ok"
+}

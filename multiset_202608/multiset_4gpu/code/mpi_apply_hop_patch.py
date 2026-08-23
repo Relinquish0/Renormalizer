@@ -187,10 +187,17 @@ def _legacy_pair_sharded_action(self, Y, batched_groups, dim, shape):
     total_pairs_this_call = 0
     compute_start = time.perf_counter()
 
+    # ``mpi_shard_patch`` (stage >= 2) already hands every rank a disjoint set of
+    # alpha rows, so re-slicing the pairs here would drop 1 - 1/size of the terms.
+    groups_presharded = getattr(self, "_alpha_sharded_groups", False)
+
     for group in batched_groups:
         n_pairs_total = int(group["n_pairs"])
         total_pairs_this_call += n_pairs_total
-        start, stop = _pair_slice(n_pairs_total)
+        if groups_presharded:
+            start, stop = 0, n_pairs_total
+        else:
+            start, stop = _pair_slice(n_pairs_total)
         if start == stop:
             continue
 
@@ -250,7 +257,7 @@ def _selector_for_alpha_range(alpha_idx, start, stop):
     return xp.asarray(indices), indices
 
 
-def _build_local_plan(batched_groups, n_electron):
+def _build_local_plan(batched_groups, n_electron, presharded=False):
     counts = tuple(_CTX.electron_counts)
     displs = tuple(_CTX.electron_displs)
     if sum(counts) != n_electron:
@@ -259,7 +266,7 @@ def _build_local_plan(batched_groups, n_electron):
             f"sum(electron_counts)={sum(counts)} N_electron={n_electron}"
         )
 
-    cache_key = (counts, displs, _CTX.rank)
+    cache_key = (counts, displs, _CTX.rank, bool(presharded))
     if batched_groups:
         cache = batched_groups[0].setdefault("_mpi_local_plan_cache", {})
         cached = cache.get(cache_key)
@@ -276,15 +283,27 @@ def _build_local_plan(batched_groups, n_electron):
             raise RuntimeError("Invalid MPI batched-group index metadata")
         host_groups.append((alpha_idx, beta_idx))
 
-    needed_by_rank = []
-    for target_rank in range(_CTX.size):
-        alpha_start = displs[target_rank]
-        alpha_stop = alpha_start + counts[target_rank]
-        needed = set()
-        for alpha_idx, beta_idx in host_groups:
-            mask = (alpha_start <= alpha_idx) & (alpha_idx < alpha_stop)
-            needed.update(int(value) for value in beta_idx[mask])
-        needed_by_rank.append(needed)
+    if presharded:
+        # ``mpi_shard_patch`` gives each rank only its own alpha rows, so this rank
+        # can no longer see which beta rows the *other* ranks will ask for.  One
+        # allgather of the local requirement restores the symmetric picture the
+        # Alltoallv below needs; the plan cache makes it a once-per-layout cost.
+        my_needed = set()
+        for _, beta_idx in host_groups:
+            my_needed.update(int(value) for value in beta_idx)
+        needed_by_rank = (
+            [my_needed] if _CTX.size == 1 else list(_CTX.comm.allgather(my_needed))
+        )
+    else:
+        needed_by_rank = []
+        for target_rank in range(_CTX.size):
+            alpha_start = displs[target_rank]
+            alpha_stop = alpha_start + counts[target_rank]
+            needed = set()
+            for alpha_idx, beta_idx in host_groups:
+                mask = (alpha_start <= alpha_idx) & (alpha_idx < alpha_stop)
+                needed.update(int(value) for value in beta_idx[mask])
+            needed_by_rank.append(needed)
 
     rank = _CTX.rank
     alpha_start = displs[rank]
@@ -437,7 +456,11 @@ def _local_electronic_action(self, Y, batched_groups, dim, shape):
             f"MPI local Afunc dim mismatch: layout={_CTX.vector_dim} action={dim}"
         )
 
-    plan = _build_local_plan(batched_groups, self.N_electron)
+    plan = _build_local_plan(
+        batched_groups,
+        self.N_electron,
+        presharded=getattr(self, "_alpha_sharded_groups", False),
+    )
     local_alpha_count = plan["local_alpha_count"]
     if int(Y.size) != local_alpha_count * dim:
         raise RuntimeError(

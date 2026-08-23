@@ -1,0 +1,20 @@
+{
+  "stage": 4,
+  "ntasks": 4,
+  "max_bonddim": 64,
+  "nu_max": 8,
+  "nsteps": 1,
+  "runs": [
+    {
+      "tag": "29x29",
+      "nrow": 29,
+      "ncol": 29,
+      "n_sites": 841,
+      "exit_code": 0,
+      "status": "ok",
+      "seconds": 11349.398104667664,
+      "log": "/curie-home/zengjj/Renormalizer/multiset_202608/multiset_4gpu/scaling/result/29x29/run_mem.log",
+      "failure_reason": null
+    }
+  ]
+}

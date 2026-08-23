@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 
 import logging
+import os
 from typing import List, Tuple
 
 import numpy as np
@@ -10,7 +11,7 @@ from renormalizer.lib import expm_krylov
 from renormalizer.model.model import Model
 from renormalizer.model.op import Op
 from renormalizer.mps import Mps
-from renormalizer.mps.backend import xp
+from renormalizer.mps.backend import USE_GPU, xp
 from renormalizer.mps.lib import Environ, _sum
 from renormalizer.mps.matrix import asnumpy, asxp, tensordot
 from renormalizer.mps.mpo import Mpo
@@ -26,6 +27,57 @@ from renormalizer.multiset.multiset_mps import (
 from renormalizer.utils import CompressConfig, CompressCriteria, EvolveConfig, EvolveMethod, Quantity
 
 logger = logging.getLogger(__name__)
+
+# Lanczos basis pre-allocation for the multiset TDVP solves.  The multiset Krylov
+# vector spans every electronic component at once, so this array is the largest
+# single GPU allocation in the program; convergence is measured at 17 iterations
+# at every lattice size tested, so 50 wastes about two thirds of it.
+KRYLOV_BLOCK_SIZE = int(os.environ.get("RENO_MS_KRYLOV_BLOCK", "24"))
+
+if USE_GPU:
+    import cupyx as _cupyx
+
+
+def _scatter_add_rows(target, row_idx, values):
+    """``target[row_idx] += values`` with duplicate rows accumulated.
+
+    Replaces multiplying by a dense one-hot (N_electron x n_pairs) matrix, whose
+    FLOPs and footprint both grow one power of L faster than the contraction it
+    was attached to.
+    """
+    if not USE_GPU:
+        np.add.at(target, row_idx, values)
+        return target
+    if target.dtype.kind == "c":
+        # cupyx.scatter_add has no complex kernel; a float64 view of a contiguous
+        # complex128 array is an exact reinterpretation, and the row axis is
+        # untouched by it.
+        _cupyx.scatter_add(
+            target.view(xp.float64),
+            row_idx,
+            xp.ascontiguousarray(values).view(xp.float64),
+        )
+    else:
+        _cupyx.scatter_add(target, row_idx, values)
+    return target
+
+
+class _EmptyMsBlock(list):
+    """Stand-in for an ``(alpha, beta)`` block that carries no Hamiltonian terms.
+
+    Behaves like the empty list the block matrix is initialised with, and also
+    answers ``.ham_terms`` so the consumers that reach for it (``MultisetMpo``,
+    ``multiset_spectra``) need no special case.
+    """
+
+    __slots__ = ()
+
+    @property
+    def ham_terms(self):
+        return []
+
+
+EMPTY_MS_BLOCK = _EmptyMsBlock()
 
 
 class MultisetModel:
@@ -74,6 +126,9 @@ class MultisetModel:
         self._qr_qn_plan_cache = {}
         self._reuse_environ_cache = True
         self._environ_cache = None
+        # Constant shift H -> H - offset*I, applied inside the batched hop instead
+        # of being baked into N_electron^2 rebuilt MPOs (see set_energy_offset).
+        self._energy_offset = 0.0
         self._environ_cache_token_counter = 0
         self._active_mpo_select_grouping()
         self.MsMps = None
@@ -141,9 +196,18 @@ class MultisetModel:
         return new_op
 
     def ConstructMsModel(self):
+        # Only a thin band of the N_electron x N_electron block matrix carries
+        # operators (L diagonal + 4 hopping neighbours per site).  An empty
+        # ``Model`` still builds the full per-basis lookup tables: 102 KB and
+        # 0.5 ms at 729 phonon sites, i.e. 52 GiB and 266 s of pure waste for the
+        # 531441 blocks of a 27x27 lattice.  Empty blocks keep the ``[]`` they
+        # were initialised with, wrapped so ``.ham_terms`` still answers.
         for i in range(self.N_electron):
             for j in range(self.N_electron):
-                self.MsModel[i][j] = Model(basis=self.basis_set, ham_terms=self.MsOp[i][j])
+                if len(self.MsOp[i][j]) == 0:
+                    self.MsModel[i][j] = EMPTY_MS_BLOCK
+                else:
+                    self.MsModel[i][j] = Model(basis=self.basis_set, ham_terms=self.MsOp[i][j])
 
     def ConstructInitModel(self):
         init_terms = []
@@ -206,9 +270,6 @@ class MultisetModel:
                         "pair_ids": tuple(active_mpos_group["pair_ids"]),
                         "alpha_idx": xp.asarray(active_mpos_group["alpha_idx"], dtype=np.int64),
                         "beta_idx": xp.asarray(active_mpos_group["beta_idx"], dtype=np.int64),
-                        "S": self._build_pair_to_alpha_matrix(
-                            active_mpos_group["alpha_idx"], active_mpos_group["w_tensors"][0].real.dtype
-                        ),
                         "W": xp.stack(active_mpos_group["w_tensors"]),
                         "nsite": 1,
                         "n_pairs": len(active_mpos_group["pair_ids"]),
@@ -216,11 +277,19 @@ class MultisetModel:
                 )
             self._site_group_templates.append(templates)
 
-    def _build_pair_to_alpha_matrix(self, alpha_idx, dtype):
-        scatter = xp.zeros((self.N_electron, len(alpha_idx)), dtype=dtype)
-        for i, alpha in enumerate(alpha_idx):
-            scatter[alpha, i] = 1.0
-        return scatter
+    def set_energy_offset(self, energy):
+        """Shift the Hamiltonian by ``-energy * I`` without touching the MPOs.
+
+        In the projected TDVP equations the environments are built from isometries,
+        so a constant shift of ``H`` is exactly a constant shift of every one-site
+        and zero-site effective Hamiltonian.  Applying it as a scalar in
+        ``_apply_hop_batched`` is therefore identical to passing ``offset=`` to
+        every diagonal ``Mpo``, and avoids rebuilding N_electron^2 MPOs plus a
+        second pass of ``_active_mpo_select_grouping``.
+        """
+        if isinstance(energy, Quantity):
+            energy = energy.as_au()
+        self._energy_offset = float(energy)
 
     def _invalidate_environ_cache(self):
         self._environ_cache = None
@@ -243,17 +312,38 @@ class MultisetModel:
             return False
         return True
 
-    def _build_environ_list(self, ms_mps: MultisetMps, conj_mps):
-        return [
-            Environ(
-                ms_mps.msmps[self._active_pairs_index[pair_id][1]],
-                self._active_pair_mpos[pair_id],
-                mps_conj=conj_mps[self._active_pairs_index[pair_id][0]],
-            )
-            for pair_id in range(len(self._active_pairs_index))
-        ]
+    def _build_environ_list(self, ms_mps: MultisetMps, conj_mps=None):
+        """Build one ``Environ`` per active pair, holding at most one conjugate MPS.
 
-    def _get_or_build_environ_list(self, ms_mps: MultisetMps, conj_mps):
+        ``Environ`` needs the conjugate of the *bra* (alpha) chain.  Materialising
+        all ``N_electron`` conjugates at once costs a second full copy of the
+        multiset state; building them one alpha row at a time costs one chain.
+        """
+        environ_list = [None] * len(self._active_pairs_index)
+        for alpha in range(self.N_electron):
+            pair_ids = self._active_pairs_by_alpha[alpha]
+            if not pair_ids:
+                continue
+            if conj_mps is not None:
+                conj_alpha = conj_mps[alpha]
+            else:
+                conj_alpha = ms_mps.msmps[alpha].conj()
+            for pair_id in pair_ids:
+                beta = self._active_pairs_index[pair_id][1]
+                environ_list[pair_id] = Environ(
+                    ms_mps.msmps[beta],
+                    self._active_pair_mpos[pair_id],
+                    mps_conj=conj_alpha,
+                )
+            if conj_mps is None:
+                del conj_alpha
+        if any(environ is None for environ in environ_list):
+            raise RuntimeError(
+                "_active_pairs_by_alpha does not cover every active pair"
+            )
+        return environ_list
+
+    def _get_or_build_environ_list(self, ms_mps: MultisetMps, conj_mps=None):
         if self._has_valid_environ_cache(ms_mps):
             return self._environ_cache["envs"]
         environ_list = self._build_environ_list(ms_mps, conj_mps)
@@ -413,7 +503,6 @@ class MultisetModel:
                 {
                     "L": xp.stack([l_tensors[pair_id] for pair_id in pair_ids]),
                     "R": xp.stack([r_tensors[pair_id] for pair_id in pair_ids]),
-                    "S": template["S"],
                     "W": template["W"],
                     "alpha_idx": template["alpha_idx"],
                     "beta_idx": template["beta_idx"],
@@ -450,7 +539,6 @@ class MultisetModel:
                 {
                     "L": xp.stack(active_mpos_group["L"]),
                     "R": xp.stack(active_mpos_group["R"]),
-                    "S": self._build_pair_to_alpha_matrix(active_mpos_group["alpha_idx"], active_mpos_group["L"][0].real.dtype),
                     "W": None,
                     "alpha_idx": xp.asarray(active_mpos_group["alpha_idx"], dtype=np.int64),
                     "beta_idx": xp.asarray(active_mpos_group["beta_idx"], dtype=np.int64),
@@ -517,8 +605,9 @@ class MultisetModel:
             if self.evolve_config.ivp_solver != "krylov":
                 coef = 1j
 
-        conj_mps = [mps_alpha.conj() for mps_alpha in ms_mps.msmps]
-        Environ_list = self._get_or_build_environ_list(ms_mps, conj_mps)
+        # The full N_electron conjugate copy is only consumed on a cache miss, and
+        # even then only one alpha row at a time (see _build_environ_list).
+        Environ_list = self._get_or_build_environ_list(ms_mps)
 
         local_steps = []
         for i in range(2):
@@ -536,7 +625,7 @@ class MultisetModel:
                 ivp_eq = lambda Y: self._apply_hop_batched(Y, batched_data, dim, shape_imps)
                 ivp_eq._reno_vector_block_count = self.N_electron
                 if self.evolve_config.ivp_solver == "krylov":
-                    mps_t, j = expm_krylov(ivp_eq, -1j * evolve_dt / 2, Y0)
+                    mps_t, j = expm_krylov(ivp_eq, -1j * evolve_dt / 2, Y0, block_size=KRYLOV_BLOCK_SIZE)
 
                 mps_t = mps_t.reshape((self.N_electron,) + tuple(shape_imps))
                 local_steps.append(j)
@@ -586,7 +675,7 @@ class MultisetModel:
                     if self.evolve_config.ivp_solver == "krylov":
                         ivp_eq_Ut = lambda Y: self._apply_hop_batched(Y, batched_u, dimU, shapeU)
                         ivp_eq_Ut._reno_vector_block_count = self.N_electron
-                        Ut, j2 = expm_krylov(ivp_eq_Ut, 1j * evolve_dt / 2, U0)
+                        Ut, j2 = expm_krylov(ivp_eq_Ut, 1j * evolve_dt / 2, U0, block_size=KRYLOV_BLOCK_SIZE)
 
                     local_steps.append(j2)
                     Ut = Ut.reshape(self.N_electron, dimU)
@@ -628,7 +717,7 @@ class MultisetModel:
                     ivp_eq_Ct = lambda Y: self._apply_hop_batched(Y, batched_c, dimC, shapeC)
                     ivp_eq_Ct._reno_vector_block_count = self.N_electron
                     if self.evolve_config.ivp_solver == "krylov":
-                        Ct, j2 = expm_krylov(ivp_eq_Ct, 1j * evolve_dt / 2, C0)
+                        Ct, j2 = expm_krylov(ivp_eq_Ct, 1j * evolve_dt / 2, C0, block_size=KRYLOV_BLOCK_SIZE)
 
                     local_steps.append(j2)
                     Ct = Ct.reshape(self.N_electron, dimC)
@@ -764,7 +853,6 @@ class MultisetModel:
         for group in batched_groups:
             L_all = group["L"]
             R_all = group["R"]
-            S = group["S"]
             beta_idx = group["beta_idx"]
             nsite = group["nsite"]
             n_pairs = group["n_pairs"]
@@ -794,5 +882,7 @@ class MultisetModel:
                 out = xp.einsum("nclb,nabc->nal", temp, L_all)
 
             out_flat = out.reshape(n_pairs, dim)
-            Y_out += xp.matmul(S, out_flat)
+            _scatter_add_rows(Y_out, group["alpha_idx"], out_flat)
+        if self._energy_offset:
+            Y_out -= self._energy_offset * Y
         return Y_out.ravel()

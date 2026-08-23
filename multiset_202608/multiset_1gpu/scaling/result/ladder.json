@@ -1,0 +1,29 @@
+{
+  "n_gpu": 1,
+  "max_bonddim": 64,
+  "nu_max": 8,
+  "nsteps": 2,
+  "setup_only": "0",
+  "runs": [
+    {
+      "tag": "21x21",
+      "nrow": 21,
+      "ncol": 21,
+      "n_sites": 441,
+      "exit_code": 0,
+      "status": "ok",
+      "seconds": 14092.775396108627,
+      "log": "/curie-home/zengjj/Renormalizer/multiset_202608/multiset_1gpu/scaling/result/21x21/run.log",
+      "failure_reason": null,
+      "host_peak_gb": 352.9979705810547,
+      "gpu_device_used_gb": 30.38232421875,
+      "gpu_pool_total_gb": 30.012253761291504,
+      "setup_seconds": 5599.963897608221,
+      "seconds_per_step": 4223.139300119132,
+      "mps_total_gb": 94.15477180480957,
+      "mps_per_set_mean_gb": 0.2135028839111328,
+      "mps_per_set_max_gb": 0.2135028839111328,
+      "environ_total_gb": 136.99173845350742
+    }
+  ]
+}

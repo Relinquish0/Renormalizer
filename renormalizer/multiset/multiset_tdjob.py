@@ -577,25 +577,16 @@ class MultisetChargeDiffusionDynamics(MultisetTdJob):
         state.ms_normalize("mps_only")
 
     def _set_hamiltonian_offset(self, energy):
+        """Apply the reference-energy shift as a scalar, not as an MPO rebuild.
+
+        The previous implementation rebuilt all N_electron^2 ``Mpo`` objects just
+        to pass ``offset=`` to the diagonal ones and then re-ran
+        ``_active_mpo_select_grouping`` (2495 s at 25x25).  ``set_energy_offset``
+        is exactly equivalent for the projected TDVP equations and is free.
+        """
         if not isinstance(energy, Quantity):
             energy = Quantity(energy)
-        for alpha in range(self.ms_model.N_electron):
-            for beta in range(self.ms_model.N_electron):
-                if len(self.ms_model.MsModel[alpha][beta].ham_terms) == 0:
-                    self.ms_model.MsMpo.msmpo[alpha][beta] = []
-                elif alpha == beta:
-                    self.ms_model.MsMpo.msmpo[alpha][beta] = Mpo(
-                        model=self.ms_model.MsModel[alpha][beta],
-                        terms=None,
-                        offset=energy,
-                    )
-                else:
-                    self.ms_model.MsMpo.msmpo[alpha][beta] = Mpo(
-                        model=self.ms_model.MsModel[alpha][beta],
-                        terms=None,
-                        offset=Quantity(0),
-                    )
-        self.ms_model._active_mpo_select_grouping()
+        self.ms_model.set_energy_offset(energy)
 
     def init_mps(self):
         state = self._init_msmps(self.init_mp())
