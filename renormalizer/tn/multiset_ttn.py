@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from typing import Dict, List, Sequence, Tuple, Union
 
 import opt_einsum as oe
@@ -55,6 +56,21 @@ class MsTTNBase(Tree):
 
 
 class MsTTNS(MsTTNBase):
+    """A multiset wavefunction stored as independent :class:`TTNS` objects.
+
+    The old implementation put the electronic-set index in front of every
+    node tensor.  That layout was convenient for batched contractions, but it
+    made component-wise expansion require two complete copies of the state.
+    ``MsTTNS`` now owns a list of ordinary TTNS objects and only packs the
+    tensor of the node currently being processed.  This mirrors
+    ``MultisetMps`` and keeps the public multiset API unchanged.
+
+    All components coupled in one TDVP step currently need compatible node
+    shapes and quantum-number sectors.  ``layout_groups`` exposes the groups
+    explicitly so a future adaptive-rank implementation can evolve compatible
+    groups separately without changing the storage model again.
+    """
+
     def __init__(
         self,
         basis: BasisTree,
@@ -62,23 +78,29 @@ class MsTTNS(MsTTNBase):
         condition: Dict = None,
         root: MsTreeNodeTensor = None,
         ttns_list: Sequence[TTNS] = None,
+        _copy_components: bool = True,
     ):
         if ttns_list is not None:
             if root is not None or nset is not None:
                 raise ValueError("`ttns_list` can not be combined with `root` or `nset`.")
-            root = self._root_from_ttns_list(basis, ttns_list)
-            nset = len(ttns_list)
+            components = [ttns.copy() for ttns in ttns_list] if _copy_components else list(ttns_list)
         elif root is None:
             if nset is None:
                 raise ValueError("`nset` is required when no root or ttns_list is provided.")
             ref = TTNS(basis, condition=condition)
-            root = self._root_from_ttns_list(basis, [ref.copy() for _ in range(nset)])
+            components = [ref] + [ref.copy() for _ in range(int(nset) - 1)]
         else:
             if nset is None:
                 nset = root.tensor.shape[0]
+            components = self._components_from_stacked_root(basis, root, int(nset))
 
-        self.nset = int(nset)
-        super().__init__(basis, root)
+        if not components:
+            raise ValueError("MsTTNS requires at least one TTNS component.")
+        self.ttns_list = components
+        # Alias consistent with MultisetMps and useful for downstream code.
+        self.msttns = self.ttns_list
+        self.nset = len(components)
+        super().__init__(basis, components[0].root)
         self.coeff = 1
         self.compress_config = CompressConfig(CompressCriteria.fixed)
         self.evolve_config = EvolveConfig(EvolveMethod.tdvp_ps, force_ovlp=False)
@@ -86,67 +108,169 @@ class MsTTNS(MsTTNBase):
         self.check_shape()
 
     @staticmethod
-    def _root_from_ttns_list(basis: BasisTree, ttns_list: Sequence[TTNS]) -> MsTreeNodeTensor:
-        if len(ttns_list) == 0:
-            raise ValueError("`ttns_list` must not be empty.")
-        ref = ttns_list[0]
-        if ref.basis is not basis:
-            if len(ref.basis.node_list) != len(basis.node_list):
-                raise ValueError("Basis tree incompatible with the TTNS list.")
-        nodes = []
-        for inode, ref_node in enumerate(ref.node_list):
-            tensors = []
-            for ttns in ttns_list:
-                node = ttns.node_list[inode]
-                if node.shape != ref_node.shape:
-                    raise ValueError("All TTNS components must have identical node shapes.")
-                np.testing.assert_allclose(node.qn, ref_node.qn)
-                tensors.append(node.tensor)
-            nodes.append(MsTreeNodeTensor(np.stack(tensors, axis=0), ref_node.qn.copy()))
-        return copy_connection(ref.node_list, nodes)
+    def _components_from_stacked_root(basis: BasisTree, root: MsTreeNodeTensor, nset: int) -> List[TTNS]:
+        """Compatibility reader for the former leading-set-axis layout."""
+        stacked_nodes = Tree(root).node_list
+        components = []
+        for iset in range(nset):
+            component = TTNS(basis)
+            for dst, src in zip(component.node_list, stacked_nodes):
+                dst.tensor = src.tensor[iset].copy()
+                dst.qn = src.qn.copy()
+            components.append(component)
+        return components
 
     @classmethod
     def from_ttns_list(cls, ttns_list: Sequence[TTNS]) -> "MsTTNS":
         return cls(ttns_list[0].basis, ttns_list=ttns_list)
 
-    def to_ttns_list(self) -> List[TTNS]:
-        components = []
-        for iset in range(self.nset):
-            new = TTNS(self.basis)
-            new.coeff = self.coeff
-            new.compress_config = self.compress_config.copy()
-            new.evolve_config = self.evolve_config.copy()
-            for dst, src in zip(new.node_list, self.node_list):
-                dst.tensor = src.tensor[iset].copy()
-                dst.qn = src.qn.copy()
-            components.append(new)
-        return components
+    @classmethod
+    def _from_owned_components(cls, ttns_list: Sequence[TTNS]) -> "MsTTNS":
+        """Build from freshly-created components without another deep copy."""
+        return cls(ttns_list[0].basis, ttns_list=ttns_list, _copy_components=False)
+
+    def to_ttns_list(self, copy: bool = True) -> List[TTNS]:
+        if copy:
+            return [component.copy() for component in self.ttns_list]
+        return list(self.ttns_list)
+
+    def print_shape(
+        self,
+        full: bool = False,
+        print_function=None,
+        component_indices: Sequence[int] = None,
+        component_labels: Sequence = None,
+    ):
+        """Print the tensor-tree shape of every selected TTNS component.
+
+        ``MsTTNS`` stores electronic components as independent ``TTNS``
+        objects, so delegating to only ``self.root`` would silently describe
+        component zero and hide a possible layout mismatch.  This method uses
+        :meth:`TTNS.print_shape` for each selected component and labels every
+        tree explicitly.
+
+        Parameters
+        ----------
+        full
+            Print each complete node-tensor shape.  If false, print only the
+            parent-bond dimension, matching :meth:`TTNS.print_shape`.
+        print_function
+            Callback for one output line.  Defaults to :func:`print`.
+        component_indices
+            Local component indices to print.  Defaults to all components.
+        component_labels
+            Optional display labels corresponding to ``component_indices``.
+            This is useful when a distributed caller stores only a shard but
+            wants to show global electronic-state indices.
+        """
+        if print_function is None:
+            print_function = print
+        if component_indices is None:
+            component_indices = list(range(self.nset))
+        else:
+            component_indices = [int(index) for index in component_indices]
+        for index in component_indices:
+            if index < 0 or index >= self.nset:
+                raise IndexError(
+                    f"component index {index} outside MsTTNS with {self.nset} components"
+                )
+
+        if component_labels is None:
+            component_labels = component_indices
+        else:
+            component_labels = list(component_labels)
+            if len(component_labels) != len(component_indices):
+                raise ValueError(
+                    "component_labels must have the same length as component_indices"
+                )
+
+        for index, label in zip(component_indices, component_labels):
+            print_function(f"MsTTNS component {label} (local index {index})")
+            self.ttns_list[index].print_shape(
+                full=full, print_function=print_function
+            )
+
+    def _inode(self, node_or_inode) -> int:
+        if isinstance(node_or_inode, int):
+            return node_or_inode
+        return self.node_idx[node_or_inode]
+
+    def component_node(self, iset: int, node_or_inode) -> TreeNodeTensor:
+        return self.ttns_list[iset].node_list[self._inode(node_or_inode)]
+
+    def node_tensor_batch(self, node_or_inode, indices=None, device: bool = False):
+        """Pack one node across compatible TTNS components.
+
+        Packing is intentionally node-local: no second copy of the full tree is
+        ever formed.  ``indices`` is used by active-pair contractions to avoid
+        packing components that are not needed by the current Hamiltonian
+        group.
+        """
+        inode = self._inode(node_or_inode)
+        if indices is None:
+            indices = range(self.nset)
+        tensors = [self.ttns_list[int(iset)].node_list[inode].tensor for iset in indices]
+        stack_module = xp if device else np
+        return stack_module.stack([stack_module.asarray(tensor) for tensor in tensors])
+
+    def set_node_tensor_batch(self, node_or_inode, tensors, indices=None):
+        inode = self._inode(node_or_inode)
+        if indices is None:
+            indices = range(self.nset)
+        tensors = asnumpy(tensors)
+        for ibatch, iset in enumerate(indices):
+            self.ttns_list[int(iset)].node_list[inode].tensor = tensors[ibatch]
+        self._population_cache = None
+
+    @property
+    def layout_groups(self):
+        """Component indices grouped by complete tree tensor layout."""
+        groups = {}
+        for iset, component in enumerate(self.ttns_list):
+            signature = tuple((node.shape, node.qn.shape, node.qn.tobytes()) for node in component.node_list)
+            groups.setdefault(signature, []).append(iset)
+        return tuple(tuple(indices) for indices in groups.values())
+
+    def _require_common_layout(self):
+        groups = self.layout_groups
+        if len(groups) != 1:
+            raise ValueError(
+                "Coupled multiset TDVP currently requires one compatible TTNS layout group; "
+                f"found component groups with sizes {[len(group) for group in groups]}."
+            )
+        return groups[0]
 
     def metacopy(self):
-        nodes = []
-        for node in self.node_list:
-            shape = (self.nset,) + tuple(node.shape[1:])
-            nodes.append(MsTreeNodeTensor(np.zeros(shape, dtype=node.tensor.dtype), node.qn.copy()))
-        root = copy_connection(self.node_list, nodes)
-        new = self.__class__(self.basis, nset=self.nset, root=root)
+        components = []
+        for component in self.ttns_list:
+            nodes = [
+                TreeNodeTensor(np.zeros_like(node.tensor), node.qn.copy())
+                for node in component.node_list
+            ]
+            root = copy_connection(component.node_list, nodes)
+            new_component = TTNS(self.basis, root=root)
+            new_component.coeff = component.coeff
+            new_component.compress_config = component.compress_config.copy()
+            new_component.evolve_config = component.evolve_config.copy()
+            components.append(new_component)
+        new = self.__class__._from_owned_components(components)
         new.coeff = self.coeff
         new.compress_config = self.compress_config.copy()
         new.evolve_config = self.evolve_config.copy()
         return new
 
     def copy(self):
-        new = self.metacopy()
-        for dst, src in zip(new.node_list, self.node_list):
-            dst.tensor = src.tensor.copy()
-            dst.qn = src.qn.copy()
+        new = self.__class__._from_owned_components([component.copy() for component in self.ttns_list])
+        new.coeff = self.coeff
+        new.compress_config = self.compress_config.copy()
+        new.evolve_config = self.evolve_config.copy()
         new._population_cache = None if self._population_cache is None else self._population_cache.copy()
         return new
 
     def to_complex(self, inplace: bool = False):
-        new = self if inplace else self.metacopy()
-        for dst, src in zip(new.node_list, self.node_list):
-            dst.tensor = np.asarray(src.tensor, dtype=backend.complex_dtype)
-            dst.qn = src.qn.copy()
+        new = self if inplace else self.copy()
+        for component in new.ttns_list:
+            component.to_complex(inplace=True)
         return new
 
     @property
@@ -155,7 +279,11 @@ class MsTTNS(MsTTNBase):
 
     @property
     def bond_dims(self):
-        return [node.tensor.shape[-1] for node in self.node_list]
+        return np.max(np.asarray(self.component_bond_dims, dtype=int), axis=0).tolist()
+
+    @property
+    def component_bond_dims(self):
+        return [component.bond_dims for component in self.ttns_list]
 
     @property
     def bond_dims_exact(self) -> np.ndarray:
@@ -174,17 +302,15 @@ class MsTTNS(MsTTNBase):
             return np.asarray(bond_dims_exact)
 
     def check_shape(self):
-        for snode, bnode in zip(self.node_list, self.basis.node_list):
-            assert snode.tensor.shape[0] == self.nset
-            assert snode.tensor.ndim == len(snode.children) + bnode.n_sets + 2
-            assert snode.qn.shape[0] == snode.tensor.shape[-1]
-            assert snode.qn.shape[1] == bnode.qn_size
-            for i, b in enumerate(bnode.basis_sets):
-                assert snode.shape[1 + len(snode.children) + i] == b.nbas
+        for component in self.ttns_list:
+            component.check_shape()
+            if len(component.node_list) != len(self.basis.node_list):
+                raise ValueError("TTNS component has an incompatible basis-tree topology.")
+        return True
 
     def check_canonical(self, atol=None):
-        for node in self.node_list[1:]:
-            node.check_canonical(atol)
+        for component in self.ttns_list:
+            component.check_canonical(atol)
         return True
 
     def get_qnmat(self, node: MsTreeNodeTensor, include_parent: bool = False):
@@ -279,19 +405,26 @@ class MsTTNS(MsTTNBase):
 
     def decompose_to_parent(self, node: MsTreeNodeTensor):
         assert node.parent is not None
+        self._require_common_layout()
+        inode = self._inode(node)
         qnbigl, qnbigr, _ = self.get_qnmat(node, include_parent=False)
-        tensor = node.tensor.reshape(self.nset, -1, node.shape[-1])
+        tensor_batch = self.node_tensor_batch(inode)
+        tensor = tensor_batch.reshape(self.nset, -1, node.shape[-1])
         u, qnlnew, v, qnrnew = self._batched_qr_qn(tensor, qnbigl, qnbigr, system="L")
-        node.tensor = u.reshape((self.nset,) + tuple(node.shape[1:-1]) + (u.shape[-1],))
-        node.qn = qnlnew
+        new_shape = tuple(node.shape[:-1]) + (u.shape[-1],)
+        self.set_node_tensor_batch(inode, u.reshape((self.nset,) + new_shape))
+        for component in self.ttns_list:
+            component.node_list[inode].qn = qnlnew
         return v
 
     def merge_to_parent(self, node: MsTreeNodeTensor, v):
         parent = node.parent
+        parent_inode = self._inode(parent)
+        # axis 0 is the temporary component batch.
         axis = 1 + node.idx_as_child
-        parent.tensor = np.moveaxis(parent.tensor, axis, -1)
-        merged = np.einsum("n...r,nrk->n...k", parent.tensor, v)
-        parent.tensor = np.moveaxis(merged, -1, axis)
+        parent_batch = np.moveaxis(self.node_tensor_batch(parent_inode), axis, -1)
+        merged = np.einsum("n...r,nrk->n...k", parent_batch, v)
+        self.set_node_tensor_batch(parent_inode, np.moveaxis(merged, -1, axis))
 
     def push_cano_to_parent(self, node: MsTreeNodeTensor):
         v = self.decompose_to_parent(node)
@@ -307,22 +440,26 @@ class MsTTNS(MsTTNBase):
             qnbigl = add_outer(qnbigl, b.sigmaqn)
         qnbigl = add_outer(qnbigl, self.qntot - node.qn)
         qnbigr = node.children[ichild].qn
-        tensor = np.moveaxis(node.tensor, 1 + ichild, -1)
+        tensor = np.moveaxis(self.node_tensor_batch(node), 1 + ichild, -1)
         shape = list(tensor.shape)
-        tensor = tensor.reshape(self.nset, -1, node.shape[1 + ichild])
+        tensor = tensor.reshape(self.nset, -1, node.shape[ichild])
         return qnbigl, qnbigr, tensor, shape
 
     def decompose_to_child(self, node: MsTreeNodeTensor, ichild: int):
+        self._require_common_layout()
         qnbigl, qnbigr, tensor, shape = self._moveaxis_for_child(node, ichild)
         u, qnl, v, qnr = self._batched_qr_qn(tensor, qnbigl, qnbigr, system="L")
         shape[-1] = u.shape[-1]
-        node.tensor = np.moveaxis(u.reshape(shape), -1, 1 + ichild)
-        node.children[ichild].qn = qnr
+        self.set_node_tensor_batch(node, np.moveaxis(u.reshape(shape), -1, 1 + ichild))
+        child_inode = self._inode(node.children[ichild])
+        for component in self.ttns_list:
+            component.node_list[child_inode].qn = qnr
         return v
 
     def merge_to_child(self, node: MsTreeNodeTensor, ichild: int, v):
         child = node.children[ichild]
-        child.tensor = np.einsum("n...r,nrk->n...k", child.tensor, v)
+        child_batch = self.node_tensor_batch(child)
+        self.set_node_tensor_batch(child, np.einsum("n...r,nrk->n...k", child_batch, v))
 
     def push_cano_to_child(self, node: MsTreeNodeTensor, ichild: int):
         v = self.decompose_to_child(node, ichild)
@@ -336,14 +473,104 @@ class MsTTNS(MsTTNBase):
 
     @staticmethod
     def _sum_ttns(ttns_list: Sequence[TTNS], compress=False, temp_m_trunc=None):
+        """Sum TTNS terms without constructing a high-arity direct sum.
+
+        An MPS can normally accumulate a small batch before compression because
+        every site has only two virtual legs.  At a ternary TTNS node, however,
+        adding ``k`` terms enlarges all four virtual legs before canonicalisation
+        and the temporary tensor scales as ``k**4``.  Compress after every
+        binary addition so the peak contains at most one compressed accumulator
+        and one new term.  Since fixed-rank truncation is nonlinear, callers
+        that need an unbiased final subspace should give this accumulator a
+        modest working-rank margin and compress to the requested rank only
+        after all terms have been accumulated.
+        """
         if len(ttns_list) == 0:
             return None
+        sum_mode = os.environ.get(
+            "RENO_MS_TTN_SUM_MODE", "sequential"
+        ).strip().lower()
+        if sum_mode not in {"sequential", "batch"}:
+            raise ValueError(
+                "RENO_MS_TTN_SUM_MODE must be 'sequential' or 'batch', "
+                f"got {sum_mode!r}"
+            )
         res = ttns_list[0].copy()
         for ttns in ttns_list[1:]:
             res = res + ttns
-        if compress:
+            if compress and sum_mode == "sequential":
+                res = res.canonicalise().compress(temp_m_trunc)
+        if compress and (sum_mode == "batch" or len(ttns_list) == 1):
             res.canonicalise().compress(temp_m_trunc)
         return res
+
+    @staticmethod
+    def _krylov_bond_limits(m_target, scalar_cap=None):
+        """Return strictly positive, per-edge limits for a Krylov TTNS.
+
+        ``m_target`` is deliberately nonuniform for published Tree ansatzes
+        (for example 15 on terminal ternary branches and 127 on central bonds
+        at chi=128).  Replacing it with ``max(m_target)`` is harmless for an
+        MPS only when every bond has the same limit, but can create a
+        prohibitively large high-arity TTNS tensor.  The root entry is unused
+        by ``TTNS.compress``; setting it, and any saturated edge, to one keeps
+        the profile a valid TTNS rank vector.
+        """
+        limits = np.maximum(np.asarray(m_target, dtype=int), 1)
+        if scalar_cap is not None:
+            limits = np.minimum(limits, max(int(scalar_cap), 1))
+        return limits
+
+    @staticmethod
+    def _krylov_working_limits(m_target, bond_dims_exact):
+        """Return a memory-safe oversampled rank profile for Krylov buildup.
+
+        The published P3HT ``Tree`` has terminal ternary branches whose final
+        virtual dimension is only 16 while central bonds can be 128.  Clipping
+        *every intermediate Krylov vector* to the terminal final rank makes the
+        sequential sum strongly order dependent and can remove the directions
+        that carry population to OT11--13.  Conversely, using the scalar
+        maximum (the historical MPS-style implementation) lets a ternary node
+        grow to 128 on all legs and creates a tens-of-GiB contraction.
+
+        Oversample only small requested ranks.  Large/central ranks retain
+        their requested limit, so this restores a useful pre-truncation space
+        on the terminal branches without recreating the chi**4 OOM.  The
+        expander is compressed back to ``m_target`` before it is attached to
+        the physical state, hence the final TTNS layout is unchanged.
+        """
+        raw_target = np.asarray(m_target, dtype=int)
+        target = np.maximum(raw_target, 1)
+        # ``bond_dims_exact`` is intentionally an object array: for a large
+        # subtree its combinatorial Hilbert-space dimension can exceed int64.
+        # Working ranks are small, so cap them element by element without ever
+        # narrowing the exact Python integers to a C long.
+        exact = np.asarray(bond_dims_exact, dtype=object)
+        factor = max(
+            1.0,
+            float(os.environ.get("RENO_MS_TTN_KRYLOV_OVERSAMPLE", "1")),
+        )
+        small_cap = max(
+            1,
+            int(os.environ.get("RENO_MS_TTN_KRYLOV_OVERSAMPLE_CAP", "32")),
+        )
+        if factor == 1.0:
+            return np.minimum(target, exact)
+        oversampled = np.ceil(target * factor).astype(int)
+        working = np.where(
+            (raw_target > 0) & (target < small_cap),
+            np.minimum(oversampled, small_cap),
+            target,
+        )
+        return np.asarray(
+            [
+                min(int(work), max(int(exact_dim), 1))
+                for work, exact_dim in zip(
+                    np.maximum(working, target), exact
+                )
+            ],
+            dtype=int,
+        )
 
     @staticmethod
     def _expand_component_bond_dimension(ttns: TTNS, hint_ttno: TTNO = None, coef: float = 1e-10, ex_ttns: TTNS = None):
@@ -357,6 +584,10 @@ class MsTTNS(MsTTNBase):
         ).astype(int)
         if np.all(m_target <= 0):
             return ttns
+        krylov_target = MsTTNS._krylov_bond_limits(m_target)
+        krylov_working_target = MsTTNS._krylov_working_limits(
+            m_target, ttns.bond_dims_exact
+        )
 
         if hint_ttno is None:
             expander = TTNS.random(ttns.basis, ttns.qntot, m_target)
@@ -364,34 +595,89 @@ class MsTTNS(MsTTNBase):
             logger.debug(f"bond dimension of multiset TTN hint TTNO: {hint_ttno.bond_dims}")
             lastone = ttns if ex_ttns is None else ttns + ex_ttns
             if lastone.norm == 0:
-                expander = TTNS.random(ttns.basis, ttns.qntot, m_target)
+                # A zero electronic component has no physical Krylov hint.  It
+                # can be created directly at the requested final layout; the
+                # former zero + random(m_target) + compress route needlessly
+                # built and decomposed a larger intermediate tree.
+                final_dims = np.minimum(
+                    np.asarray(ttns.compress_config.max_dims),
+                    ttns.bond_dims_exact,
+                ).astype(int)
+                expanded = TTNS.random(ttns.basis, ttns.qntot, final_dims)
+                return expanded.scale(coef, inplace=True)
             else:
+                # Match the successful multiset-MPS enrichment: accumulate
+                # H_diag^n |psi> until the requested expansion rank is filled.
+                # A single application followed by an unrelated random
+                # complement is not sufficient for a one-site TDVP manifold,
+                # especially for a 100+ mode nuclear wavefunction.
                 expander_list = []
                 expander_dims = np.zeros_like(m_target)
                 while True:
                     nextone = hint_ttno.apply(lastone)
                     if nextone.norm == 0:
-                        logger.warning("TTN hint application produced a zero expander; falling back to random expansion")
+                        logger.warning(
+                            "TTN hint application produced a zero expander; "
+                            "falling back to random expansion"
+                        )
                         expander = TTNS.random(ttns.basis, ttns.qntot, m_target)
                         break
+
                     lastone = nextone.normalize("ttns_and_coeff")
-                    lastone = lastone.canonicalise().compress(np.max(m_target))
+                    # Keep every edge below a per-edge working target.  Small
+                    # terminal Tree bonds may be modestly oversampled so the
+                    # sequential sum does not discard late Krylov directions;
+                    # central bonds never exceed their requested final rank.
+                    lastone = lastone.canonicalise().compress(
+                        krylov_working_target
+                    )
                     expander_list.append(lastone)
-                    expander = MsTTNS._sum_ttns(expander_list, compress=True, temp_m_trunc=m_target)
+                    expander = MsTTNS._sum_ttns(
+                        expander_list,
+                        compress=True,
+                        temp_m_trunc=krylov_working_target,
+                    )
 
-                    if np.all(np.asarray(expander.bond_dims) >= m_target):
+                    current_dims = np.asarray(expander.bond_dims)
+                    if np.all(current_dims >= m_target):
+                        break
+                    if np.array_equal(current_dims, expander_dims):
+                        logger.warning(
+                            "TTN Krylov expander no longer increases; "
+                            "adding the final MS-MPS-style Krylov hint"
+                        )
+                        missing_limits = MsTTNS._krylov_bond_limits(
+                            m_target - expander_dims
+                        )
+                        expander2 = hint_ttno.apply(lastone)
+                        if expander2.norm != 0:
+                            expander2 = expander2.canonicalise().compress(
+                                missing_limits
+                            )
+                            expander = MsTTNS._sum_ttns(
+                                [expander, expander2],
+                                compress=True,
+                                temp_m_trunc=krylov_working_target,
+                            )
                         break
 
-                    if np.all(np.asarray(expander.bond_dims) == expander_dims):
-                        logger.warning("TTN expander does not increase anymore. The expand target is too high")
-                        m_target2 = np.max(m_target - np.asarray(expander_dims))
-                        expander2 = hint_ttno.apply(lastone).canonicalise().compress(np.maximum(m_target2, 1))
-                        expander = expander + expander2
-                        break
+                    expander_dims = current_dims
+                    temp_m_trunc = int(
+                        np.max(m_target) / max(np.max(hint_ttno.bond_dims), 1)
+                    ) + 1
+                    propagation_limits = MsTTNS._krylov_bond_limits(
+                        m_target, scalar_cap=temp_m_trunc
+                    )
+                    lastone = lastone.canonicalise().compress(
+                        propagation_limits
+                    )
 
-                    expander_dims = np.asarray(expander.bond_dims)
-                    temp_m_trunc = int(np.max(m_target) / np.max(hint_ttno.bond_dims)) + 1
-                    lastone = lastone.canonicalise().compress(temp_m_trunc)
+                # Select the final requested basis from the oversampled union
+                # only once, after all useful Krylov directions are present.
+                if not np.array_equal(
+                    np.asarray(expander.bond_dims, dtype=int), krylov_target
+                ):
+                    expander = expander.canonicalise().compress(krylov_target)
 
         ref_norm = ttns.norm
         if ref_norm == 0 and ex_ttns is not None:
@@ -404,101 +690,64 @@ class MsTTNS(MsTTNBase):
             expanded.normalize("ttns_norm_to_coeff")
         return expanded
 
-    def _prepare_graph_hint_state(self, ttns: TTNS, m_trunc=None):
-        if ttns is None or ttns.norm == 0:
-            return None
-        hint = ttns.copy()
-        hint.compress_config = self.compress_config.copy()
-        hint.compress_config.set_bonddim(len(hint.bond_dims))
-        hint.evolve_config = self.evolve_config.copy()
-        if m_trunc is None:
-            m_trunc = hint.compress_config.max_dims
-        hint = hint.canonicalise()
-        if len(hint.node_list) > 1:
-            hint = hint.compress(m_trunc)
-        if hint.ttns_norm != 0:
-            hint.normalize("ttns_norm_to_coeff")
-            hint.scale(float(abs(hint.coeff)), inplace=True)
-            hint.coeff = 1.0
-        return hint
+    @staticmethod
+    def _pad_component_bond_dimension(ttns: TTNS, target_dims, coef: float = 1e-10):
+        """Fill rank-deficient bonds so independently stored components align.
 
-    def _build_multiround_cross_hints(self, original_ttns, ms_ttno: "MsTTNO", graph_rounds: int = None):
-        if graph_rounds is None:
-            graph_rounds = max(self.nset - 1, 0)
-
-        pairs_by_beta = [[] for _ in range(self.nset)]
-        for pair_id, (alpha, beta) in enumerate(ms_ttno.active_pairs_index):
-            if alpha == beta:
-                continue
-            pairs_by_beta[beta].append((alpha, ms_ttno.active_pair_ttnos[pair_id]))
-
-        graph_compress_config = self.compress_config.copy()
-        graph_compress_config.set_bonddim(len(original_ttns[0].bond_dims))
-        graph_max_dims = graph_compress_config.max_dims
-
-        hints_by_alpha = [[] for _ in range(self.nset)]
-        frontier = [self._prepare_graph_hint_state(ttns, graph_max_dims) for ttns in original_ttns]
-        processed_sources = set()
-
-        for iround in range(graph_rounds):
-            source_ids = [
-                beta for beta, source in enumerate(frontier)
-                if source is not None and beta not in processed_sources
-            ]
-            if not source_ids:
-                break
-
-            next_candidates = [[] for _ in range(self.nset)]
-            for beta in source_ids:
-                processed_sources.add(beta)
-                source = frontier[beta]
-                for alpha, pair_ttno in pairs_by_beta[beta]:
-                    if alpha in processed_sources:
-                        continue
-                    driven = pair_ttno.apply(source)
-                    driven = self._prepare_graph_hint_state(driven, graph_max_dims)
-                    if driven is None:
-                        continue
-                    hints_by_alpha[alpha].append(driven)
-                    next_candidates[alpha].append(driven)
-
-            frontier = [None for _ in range(self.nset)]
-            n_next = 0
-            for alpha, states in enumerate(next_candidates):
-                if not states:
-                    continue
-                combined = self._sum_ttns(
-                    states, compress=len(original_ttns[0].node_list) > 1, temp_m_trunc=graph_max_dims
-                )
-                combined = self._prepare_graph_hint_state(combined, graph_max_dims)
-                if combined is None:
-                    continue
-                frontier[alpha] = combined
-                n_next += 1
-            logger.debug("multiset TTN cross-hint graph round %s produced %s frontier states", iround + 1, n_next)
-            if n_next == 0:
-                break
-
-        return hints_by_alpha
+        Fixed-rank compression is an upper bound: a physically sparse hint can
+        still return fewer singular vectors than requested.  Node-local batch
+        operations require identical tensor layouts, so add a full-layout
+        random complement and compress back to the requested per-node profile.
+        """
+        target_dims = np.asarray(target_dims, dtype=int)
+        current_dims = np.asarray(ttns.bond_dims, dtype=int)
+        if np.array_equal(current_dims, target_dims):
+            return ttns
+        if np.any(current_dims > target_dims):
+            ttns = ttns.canonicalise().compress(target_dims)
+            current_dims = np.asarray(ttns.bond_dims, dtype=int)
+        # A standalone tree with rank-one leaf bonds cannot supply a large
+        # missing internal rank: its parent ranks are bounded by its children.
+        # Use a full target-layout complement, then truncate the direct sum.
+        padding = TTNS.random(ttns.basis, ttns.qntot, target_dims)
+        ref_norm = ttns.norm if ttns.norm != 0 else 1.0
+        padded = ttns + padding.scale(coef * ref_norm, inplace=True)
+        padded = padded.canonicalise().compress(target_dims)
+        if not np.array_equal(np.asarray(padded.bond_dims, dtype=int), target_dims):
+            raise RuntimeError(
+                "Could not pad independent TTNS component to common target layout: "
+                f"current={current_dims.tolist()} target={target_dims.tolist()} "
+                f"result={padded.bond_dims}"
+            )
+        return padded
 
     def expand_bond_dimension_multiset(
-        self, ms_ttno: "MsTTNO", coef: float = 1e-10, use_hint: bool = True, graph_rounds: int = None
+        self, ms_ttno: "MsTTNO", coef: float = 1e-10, use_hint: bool = True
     ):
-        if graph_rounds is not None:
-            logger.warning(
-                "graph_rounds is ignored by direct multiset TTNS bond expansion; "
-                "expansion now follows MultisetModel.expand_bond_dimension_multiset."
-            )
+        """Expand each electronic TTNS with the multiset-MPS recipe.
 
-        original_ttns = self.to_ttns_list()
+        For row ``alpha``, form the one-hop physical seed
+        ``psi_alpha + sum_{beta != alpha} H[alpha,beta] psi_beta`` and then
+        repeatedly apply the diagonal block ``H[alpha,alpha]``.  Localized
+        initial conditions should seed every inactive electronic component
+        with a tiny copy of the same vibrational state, as multiset-MPS does,
+        rather than with an exact zero.
+        """
+        # Components are already independent TTNS objects.  Keep read-only
+        # references here: _expand_component_bond_dimension copies the target
+        # component before modifying it, while TTNO.apply is non-mutating.
+        original_ttns = self.to_ttns_list(copy=False)
+        self.compress_config.set_bonddim(len(original_ttns[0].bond_dims))
         for ttns in original_ttns:
             ttns.compress_config = self.compress_config.copy()
             ttns.evolve_config = self.evolve_config.copy()
 
         expanded_components = []
+        zero_component_template = None
         for alpha in range(self.nset):
             ttns_alpha = original_ttns[alpha]
             ttns_alpha.compress_config = self.compress_config.copy()
+            ttns_alpha.compress_config.set_bonddim(len(ttns_alpha.bond_dims))
 
             if not use_hint:
                 expanded = self._expand_component_bond_dimension(ttns_alpha, hint_ttno=None, coef=coef, ex_ttns=None)
@@ -512,30 +761,63 @@ class MsTTNS(MsTTNBase):
                     if beta == alpha:
                         diag_ttno = pair_ttno
                     else:
-                        driven = pair_ttno.apply(original_ttns[beta])
-                        driven.compress_config = self.compress_config.copy()
-                        driven.evolve_config = self.evolve_config.copy()
-                        cross_states.append(driven)
+                        cross_states.append(pair_ttno.apply(original_ttns[beta]))
 
                 ex_ttns = self._sum_ttns(cross_states, compress=False) if cross_states else None
                 if ex_ttns is not None:
                     ex_ttns.compress_config = self.compress_config.copy()
                     ex_ttns.evolve_config = self.evolve_config.copy()
+                    if ex_ttns.norm == 0:
+                        ex_ttns = None
 
-                expanded = self._expand_component_bond_dimension(
-                    ttns_alpha,
-                    hint_ttno=diag_ttno,
-                    coef=coef,
-                    ex_ttns=ex_ttns,
-                )
+                if ex_ttns is None and ttns_alpha.norm == 0:
+                    # Most electronic rows of a localized Holstein initial
+                    # state are identical zeros.  Generate the expensive
+                    # binary-tree random basis once, then deep-copy it so the
+                    # all TTNS components remain independently owned.
+                    if zero_component_template is None:
+                        final_dims = np.minimum(
+                            np.asarray(ttns_alpha.compress_config.max_dims),
+                            ttns_alpha.bond_dims_exact,
+                        ).astype(int)
+                        zero_component_template = TTNS.random(
+                            ttns_alpha.basis,
+                            ttns_alpha.qntot,
+                            final_dims,
+                        )
+                    expanded = zero_component_template.copy().scale(coef, inplace=True)
+                else:
+                    expanded = self._expand_component_bond_dimension(
+                        ttns_alpha,
+                        hint_ttno=diag_ttno,
+                        coef=coef,
+                        ex_ttns=ex_ttns,
+                    )
 
             expanded.scale(float(abs(expanded.coeff)), inplace=True)
             expanded.coeff = 1.0
+            final_dims = np.minimum(
+                np.asarray(self.compress_config.max_dims),
+                expanded.bond_dims_exact,
+            ).astype(int)
+            if not np.array_equal(np.asarray(expanded.bond_dims), final_dims):
+                logger.info(
+                    "padding multiset TTNS component %d from max/mean %.0f/%.2f "
+                    "to common max/mean %.0f/%.2f",
+                    alpha,
+                    np.max(expanded.bond_dims),
+                    np.mean(expanded.bond_dims),
+                    np.max(final_dims),
+                    np.mean(final_dims),
+                )
+                expanded = self._pad_component_bond_dimension(expanded, final_dims, coef=coef)
             expanded.compress_config = self.compress_config.copy()
             expanded.evolve_config = self.evolve_config.copy()
             expanded_components.append(expanded)
 
-        new = MsTTNS.from_ttns_list(expanded_components)
+        # Ownership transfer avoids the former list -> fully stacked state
+        # copy, which doubled peak host memory at the end of expansion.
+        new = MsTTNS._from_owned_components(expanded_components)
         new.compress_config = self.compress_config.copy()
         new.evolve_config = self.evolve_config.copy()
         return new
@@ -564,22 +846,26 @@ class MsTTNS(MsTTNBase):
             indices.append((_id, "root", str(all_dofs)))
         else:
             indices.append((_id, str(self.tn2dofs[node.parent]), str(all_dofs)))
-        assert len(indices) == node.tensor.ndim - 1
+        assert len(indices) == node.tensor.ndim
         return indices
 
     def to_contract_args(self, iset: int, conj: bool = False):
+        if not 0 <= iset < self.nset:
+            raise IndexError(iset)
         args = []
-        for node in self.node_list:
-            tensor = node.tensor[iset]
+        for node in self.ttns_list[iset].node_list:
+            tensor = node.tensor
             if conj:
                 tensor = tensor.conj()
-            indices = self.get_node_indices(node, conj)
+            indices = self.get_node_indices(self.node_list[self.ttns_list[iset].node_idx[node]], conj)
             indices = [indices[i] for i, s in enumerate(tensor.shape) if s != 1]
             tensor = tensor.squeeze()
             args.extend([tensor, indices])
         return args
 
     def todense(self, iset: int, order: List[BasisSet] = None):
+        # TTNS.todense includes BasisDummy entries in its default output list;
+        # retain the multiset behaviour of exposing physical modes only.
         args = self.to_contract_args(iset)
         if order is None:
             order = self.basis.basis_list
@@ -606,7 +892,7 @@ class MsTTNS(MsTTNBase):
             indices.append((_id, "root", str(all_dofs)))
         else:
             indices.append((_id, str(self.tn2dofs[node.parent]), str(all_dofs)))
-        assert len(indices) == node.tensor.ndim - 1
+        assert len(indices) == node.tensor.ndim
         return indices
 
     def _norm_parent_indices(self, node: MsTreeNodeTensor, conj: bool = False):
@@ -632,8 +918,9 @@ class MsTTNS(MsTTNBase):
                         self._norm_parent_indices(child, conj=False),
                     ],
                 ])
-            args.extend([node.tensor.conj(), [batch_idx] + self._norm_node_indices(node, conj=True)])
-            args.extend([node.tensor, [batch_idx] + self._norm_node_indices(node, conj=False)])
+            node_batch = self.node_tensor_batch(node)
+            args.extend([node_batch.conj(), [batch_idx] + self._norm_node_indices(node, conj=True)])
+            args.extend([node_batch, [batch_idx] + self._norm_node_indices(node, conj=False)])
             output_indices = [
                 batch_idx,
                 self._norm_parent_indices(node, conj=True),
@@ -668,8 +955,9 @@ class MsTTNS(MsTTNBase):
                         self._norm_parent_indices(child, conj=False),
                     ],
                 ])
-            args.extend([node.tensor.conj(), [bra_idx] + self._norm_node_indices(node, conj=True)])
-            args.extend([node.tensor, [ket_idx] + self._norm_node_indices(node, conj=False)])
+            node_batch = self.node_tensor_batch(node)
+            args.extend([node_batch.conj(), [bra_idx] + self._norm_node_indices(node, conj=True)])
+            args.extend([node_batch, [ket_idx] + self._norm_node_indices(node, conj=False)])
             output_indices = [
                 bra_idx,
                 ket_idx,
@@ -696,7 +984,7 @@ class MsTTNS(MsTTNBase):
         if populations is None:
             populations = self.population()
 
-        components = self.to_ttns_list()
+        components = self.to_ttns_list(copy=False)
         S_cond_all = []
         S_raw_all = []
         for population, component in zip(populations, components):
@@ -775,7 +1063,10 @@ class MsTTNS(MsTTNBase):
         populations = self.population()
         norm2 = float(np.sum(populations))
         norm = float(np.sqrt(norm2))
-        self.root.tensor /= norm
+        if norm == 0:
+            raise ValueError("Can not normalize a zero multiset TTNS state.")
+        for component in self.ttns_list:
+            component.root.tensor /= norm
         self._population_cache = populations / norm2
         return self
 
@@ -829,6 +1120,7 @@ class MsTTNO(MsTTNBase):
         self.pair_node_tensors = [
             [onode.tensor for onode in ttno.node_list] for ttno in self.active_pair_ttnos
         ]
+        self.pair_group_size = max(1, int(os.environ.get("RENO_MS_TTN_PAIR_GROUP_SIZE", "32")))
         self.node_groups = self._build_node_groups()
         self.hop_expr_cache = {}
 
@@ -869,16 +1161,33 @@ class MsTTNO(MsTTNBase):
             node_groups = []
             for key in sorted(groups):
                 group = groups[key]
-                node_groups.append(
-                    {
-                        "pair_ids": tuple(group["pair_ids"]),
-                        "alpha_idx": xp.asarray(group["alpha_idx"], dtype=np.int64),
-                        "beta_idx": xp.asarray(group["beta_idx"], dtype=np.int64),
-                        "S": self._build_pair_to_alpha_matrix(group["alpha_idx"], group["W"][0].real.dtype),
-                        "W": xp.stack([xp.asarray(w) for w in group["W"]]),
-                        "n_pairs": len(group["pair_ids"]),
-                    }
-                )
+                for start in range(0, len(group["pair_ids"]), self.pair_group_size):
+                    stop = start + self.pair_group_size
+                    pair_ids = group["pair_ids"][start:stop]
+                    alpha_idx = group["alpha_idx"][start:stop]
+                    beta_idx = group["beta_idx"][start:stop]
+                    tensors = group["W"][start:stop]
+                    scatter_groups = []
+                    for alpha in dict.fromkeys(alpha_idx):
+                        positions = [i for i, target in enumerate(alpha_idx) if target == alpha]
+                        scatter_groups.append(
+                            (int(alpha), xp.asarray(positions, dtype=np.int64))
+                        )
+                    node_groups.append(
+                        {
+                            "pair_ids": tuple(pair_ids),
+                            "alpha_idx": xp.asarray(alpha_idx, dtype=np.int64),
+                            "beta_idx": xp.asarray(beta_idx, dtype=np.int64),
+                            "scatter_groups": tuple(scatter_groups),
+                            # Kept for callers written against the old group
+                            # schema.  The hop path now scatters directly by
+                            # alpha_idx and does not materialize nset x npair
+                            # products for every group.
+                            "S": self._build_pair_to_alpha_matrix(alpha_idx, tensors[0].real.dtype),
+                            "W": xp.stack([xp.asarray(w) for w in tensors]),
+                            "n_pairs": len(pair_ids),
+                        }
+                    )
             all_groups.append(node_groups)
         return all_groups
 
@@ -922,6 +1231,24 @@ class MsTTNEnviron:
         if build_environ:
             self.build_children_environ(ms_ttns, ms_ttno)
             self.build_parent_environ(ms_ttns, ms_ttno)
+
+    def release(self):
+        """Drop every tensor and tree reference held by this sweep cache.
+
+        A multiset environment can own many large NumPy arrays.  Relying on
+        function-local reference counting is fragile here because the TTNS
+        nodes themselves form parent/children reference cycles.  Production
+        drivers call this method in a ``finally`` block at the end of every
+        TDVP step so no environment from an earlier step can remain reachable
+        during the next one.
+        """
+        self.parent_envs.clear()
+        self.children_envs.clear()
+        self.tn2dofs_ttns.clear()
+        self.tn2dofs_ttno.clear()
+        self.basis_ttns = None
+        self.basis_ttno = None
+        self.n_pairs = 0
 
     def build_children_environ(self, ms_ttns: MsTTNS, ms_ttno: MsTTNO):
         for snode in ms_ttns.postorder_list():
@@ -1006,9 +1333,11 @@ class MsTTNEnviron:
             for i in range(len(snode.children)):
                 child_env = self._stack_pair_tensors(pair_ids, lambda pair_id, i=i: self.children_envs[pair_id][inode][i])
                 args.extend([child_env, self._batched_child_indices(snode, i, ms_ttns, ms_ttno, batch)])
-            args.extend([xp.asarray(snode.tensor[alpha_idx]).conj(), [batch] + ms_ttns.get_node_indices(snode, conj=True)])
+            bra_batch = ms_ttns.node_tensor_batch(inode, alpha_idx, device=True)
+            ket_batch = ms_ttns.node_tensor_batch(inode, beta_idx, device=True)
+            args.extend([bra_batch.conj(), [batch] + ms_ttns.get_node_indices(snode, conj=True)])
             args.extend([group["W"], self._batched_op_indices(snode, ms_ttns, ms_ttno, batch)])
-            args.extend([xp.asarray(snode.tensor[beta_idx]), [batch] + ms_ttns.get_node_indices(snode, ttno=ms_ttno)])
+            args.extend([ket_batch, [batch] + ms_ttns.get_node_indices(snode, ttno=ms_ttno)])
             args.append(self._batched_parent_indices(snode, ms_ttns, ms_ttno, batch))
             res = asnumpy(oe_contract(*asxp_oe_args(args)))
             for ibatch, pair_id in enumerate(pair_ids):
@@ -1030,9 +1359,11 @@ class MsTTNEnviron:
                 args.extend([child_env, self._batched_child_indices(snode, j, ms_ttns, ms_ttno, batch)])
             parent_env = self._stack_pair_tensors(pair_ids, lambda pair_id: self.parent_envs[pair_id][inode])
             args.extend([parent_env, self._batched_parent_indices(snode, ms_ttns, ms_ttno, batch)])
-            args.extend([xp.asarray(snode.tensor[alpha_idx]).conj(), [batch] + ms_ttns.get_node_indices(snode, conj=True)])
+            bra_batch = ms_ttns.node_tensor_batch(inode, alpha_idx, device=True)
+            ket_batch = ms_ttns.node_tensor_batch(inode, beta_idx, device=True)
+            args.extend([bra_batch.conj(), [batch] + ms_ttns.get_node_indices(snode, conj=True)])
             args.extend([group["W"], self._batched_op_indices(snode, ms_ttns, ms_ttno, batch)])
-            args.extend([xp.asarray(snode.tensor[beta_idx]), [batch] + ms_ttns.get_node_indices(snode, ttno=ms_ttno)])
+            args.extend([ket_batch, [batch] + ms_ttns.get_node_indices(snode, ttno=ms_ttno)])
             args.append(self._batched_child_indices(snode, ichild, ms_ttns, ms_ttno, batch))
             res = asnumpy(oe_contract(*asxp_oe_args(args)))
             for ibatch, pair_id in enumerate(pair_ids):
@@ -1063,4 +1394,3 @@ class MsTTNEnviron:
             (str(id(ms_ttno.active_pair_ttnos[pair_id])), str(dofs_parent_ttno), str(dofs_ttno)),
             (str(id(ms_ttns)), str(dofs_parent_ttns), str(dofs_ttns)),
         ]
-

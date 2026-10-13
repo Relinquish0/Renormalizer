@@ -95,9 +95,26 @@ def _stack_pair_tensors(pair_ids, getter):
     return xp.stack([xp.asarray(getter(pair_id)) for pair_id in pair_ids])
 
 
+def _scatter_pair_output(y_out, out, scatter_groups):
+    """Accumulate active-pair output without complex atomic operations.
+
+    CuPy's ``add.at`` does not support complex128.  Hamiltonian pairs are
+    grouped by their target electronic state once when MsTTNO is built, so the
+    runtime path only performs a few small indexed reductions per contraction
+    group.  Sequential target updates are exact and avoid a dense one-hot
+    matrix multiplication over all electronic states.
+    """
+    for alpha, positions in scatter_groups:
+        if len(positions) == 1:
+            contribution = out[positions[0]]
+        else:
+            contribution = xp.sum(out[positions], axis=0)
+        y_out[alpha] += contribution
+
+
 def _build_1site_specs(snode: MsTreeNodeTensor, ms_ttns: MsTTNS, ms_ttno: MsTTNO, ms_ttne: MsTTNEnviron):
     inode = ms_ttns.node_idx[snode]
-    shape = tuple(snode.shape[1:])
+    shape = tuple(snode.shape)
     specs = []
     cache = ms_ttno.hop_expr_cache
     for igroup, group in enumerate(ms_ttno.node_groups[inode]):
@@ -128,7 +145,9 @@ def _build_1site_specs(snode: MsTreeNodeTensor, ms_ttns: MsTTNS, ms_ttno: MsTTNO
             cached = {
                 "expr": _contract_expression_dynamic(args, x_shape, input_indices, output_indices, [w_position]),
                 "S": group["S"],
+                "alpha_idx": group["alpha_idx"],
                 "beta_idx": group["beta_idx"],
+                "scatter_groups": group["scatter_groups"],
                 "n_pairs": len(pair_ids),
             }
             cache[cache_key] = cached
@@ -179,7 +198,9 @@ def _build_0site_specs(snode: MsTreeNodeTensor, ms_ttns: MsTTNS, ms_ttno: MsTTNO
             cached = {
                 "expr": _contract_expression_dynamic(args, x_shape, input_indices, output_indices, []),
                 "S": group["S"],
+                "alpha_idx": group["alpha_idx"],
                 "beta_idx": group["beta_idx"],
+                "scatter_groups": group["scatter_groups"],
                 "n_pairs": len(pair_ids),
             }
             cache[cache_key] = cached
@@ -190,7 +211,7 @@ def _build_0site_specs(snode: MsTreeNodeTensor, ms_ttns: MsTTNS, ms_ttno: MsTTNO
 
 
 def ms_hop_expr1(snode: MsTreeNodeTensor, ms_ttns: MsTTNS, ms_ttno: MsTTNO, ms_ttne: MsTTNEnviron):
-    shape = snode.shape[1:]
+    shape = snode.shape
     dim = int(np.prod(shape))
     specs = _build_1site_specs(snode, ms_ttns, ms_ttno, ms_ttne)
 
@@ -200,7 +221,11 @@ def ms_hop_expr1(snode: MsTreeNodeTensor, ms_ttns: MsTTNS, ms_ttno: MsTTNO, ms_t
         for spec in specs:
             y_exp = y[spec["beta_idx"]]
             out = spec["expr"](*spec["dynamic_args"], y_exp)
-            y_out += xp.matmul(spec["S"], out.reshape(spec["n_pairs"], dim)).reshape((ms_ttns.nset,) + tuple(shape))
+            _scatter_pair_output(
+                y_out,
+                out.reshape((spec["n_pairs"],) + tuple(shape)),
+                spec["scatter_groups"],
+            )
         return y_out.reshape(ms_ttns.nset * dim)
 
     return hop
@@ -218,7 +243,11 @@ def ms_hop_expr0(snode: MsTreeNodeTensor, ms_ttns: MsTTNS, ms_ttno: MsTTNO, ms_t
         for spec in specs:
             y_exp = y[spec["beta_idx"]]
             out = spec["expr"](*spec["dynamic_args"], y_exp)
-            y_out += xp.matmul(spec["S"], out.reshape(spec["n_pairs"], dim)).reshape((ms_ttns.nset,) + shape)
+            _scatter_pair_output(
+                y_out,
+                out.reshape((spec["n_pairs"],) + shape),
+                spec["scatter_groups"],
+            )
         return y_out.reshape(ms_ttns.nset * dim)
 
     return hop

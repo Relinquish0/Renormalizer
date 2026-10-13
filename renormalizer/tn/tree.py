@@ -355,6 +355,10 @@ class TTNS(TTNBase):
             qnbigl, _, _ = ttns.get_qnmat(node, include_parent=False)
             qnbigl_shape = qnbigl.shape
             qnbigl = qnbigl.reshape(-1, qn_size)
+            if isinstance(m_max, (list, tuple, np.ndarray)):
+                m_max2 = int(m_max[ttns.node_idx[node]])
+            else:
+                m_max2 = int(m_max)
             u_list = []
             s_list = []
             qn_list = []
@@ -368,18 +372,21 @@ class TTNS(TTNBase):
                 if len(indices) == 1:
                     u = np.array([[1]])
                 else:
-                    u = scipy.stats.ortho_group.rvs(len(indices))
-                s = np.random.rand(len(indices))
+                    # Only ``m_max2`` columns can survive select_basis below.
+                    # Constructing the former full n x n Haar matrix is
+                    # prohibitive for a binary TTNS node (n can be chi**2).
+                    # A QR of an n x k Gaussian matrix samples the required
+                    # Haar-distributed Stiefel subspace directly.
+                    k = min(len(indices), max(m_max2, 1))
+                    random_block = np.random.standard_normal((len(indices), k))
+                    u, _ = np.linalg.qr(random_block, mode="reduced")
+                s = np.random.rand(u.shape[1])
                 u_list.append(blockrecover(indices, u, len(qnbigl)))
                 s_list.append(s)
-                qn_list += [iblock] * len(indices)
+                qn_list += [iblock] * u.shape[1]
 
             u = np.concatenate(u_list, axis=1)
             s = np.concatenate(s_list)
-            if isinstance(m_max, (list, tuple, np.ndarray)):
-                m_max2 = m_max[ttns.node_idx[node]]
-            else:
-                m_max2 = m_max
             mt, mpsdim, mpsqn, nouse = select_basis(u, s, qn_list, u, m_max2, percent=percent)
             node.tensor = mt.reshape(list(qnbigl_shape)[:-1] + [mpsdim])
             node.qn = mpsqn

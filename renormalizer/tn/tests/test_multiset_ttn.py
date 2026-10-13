@@ -4,6 +4,7 @@ from renormalizer import BasisMultiElectronVac, BasisSHO, Model, Mps, Op
 from renormalizer.multiset.multiset_model import MultisetModel
 from renormalizer.multiset.multiset_mps import MultisetMps
 from renormalizer.tn import BasisTree, MsTTNO, MsTTNS, TTNO, TTNS
+from renormalizer.tn.multiset_hop_expr import _scatter_pair_output
 from renormalizer.utils import CompressConfig, CompressCriteria, EvolveConfig, EvolveMethod
 
 
@@ -30,6 +31,21 @@ def _coupled_two_state_model():
         Op(r"b^\dagger b", "v", 0.01),
     ]
     return Model(basis, terms)
+
+
+def test_complex_pair_scatter_without_atomic_add():
+    output = onp.zeros((3, 2), dtype=complex)
+    pair_output = onp.asarray([[1 + 2j, 3j], [2 - 1j, 4], [5j, 6 - 2j]])
+    scatter_groups = (
+        (0, onp.asarray([0, 1], dtype=onp.int64)),
+        (2, onp.asarray([2], dtype=onp.int64)),
+    )
+
+    _scatter_pair_output(output, pair_output, scatter_groups)
+
+    onp.testing.assert_allclose(output[0], pair_output[0] + pair_output[1])
+    onp.testing.assert_allclose(output[1], 0)
+    onp.testing.assert_allclose(output[2], pair_output[2])
 
 
 def test_linear_tree_matches_multiset_mps_one_step():
@@ -106,9 +122,19 @@ def test_shape_canonical_and_population_sanity():
     evolved.check_shape()
     evolved.check_canonical()
 
-    for node, bnode in zip(evolved.node_list, basis_tree.node_list):
-        assert node.tensor.shape[0] == 2
-        assert node.qn.shape == (node.tensor.shape[-1], bnode.qn_size)
+    assert len(evolved.ttns_list) == 2
+    assert len(evolved.layout_groups) == 1
+    for component in evolved.ttns_list:
+        for node, bnode in zip(component.node_list, basis_tree.node_list):
+            # The electronic-set index is no longer stored in every TTNS node.
+            assert node.tensor.ndim == len(node.children) + bnode.n_sets + 1
+            assert node.qn.shape == (node.tensor.shape[-1], bnode.qn_size)
+
+    # Components must be independently owned rather than views into one
+    # leading-set-axis tensor.
+    assert evolved.ttns_list[0] is not evolved.ttns_list[1]
+    for node0, node1 in zip(evolved.ttns_list[0].node_list, evolved.ttns_list[1].node_list):
+        assert not onp.shares_memory(node0.tensor, node1.tensor)
 
     pop = evolved.population()
     assert pop.shape == (2,)
@@ -129,6 +155,29 @@ def test_population_handles_mctdh_dummy_nodes_without_dense():
 
     dense = ms_ttns.todense(0)
     assert dense.shape == (2, 2, 2)
+
+
+def test_print_shape_prints_every_selected_component():
+    basis_list = [BasisSHO("v0", 0.01, 2), BasisSHO("v1", 0.02, 3)]
+    basis_tree = BasisTree.linear(basis_list)
+    component = TTNS(basis_tree, condition={})
+    ms_ttns = MsTTNS.from_ttns_list([component, component])
+
+    lines = []
+    ms_ttns.print_shape(
+        full=True,
+        print_function=lines.append,
+        component_indices=[0, 1],
+        component_labels=["LE1", "CS1"],
+    )
+
+    assert lines.count("MsTTNS component LE1 (local index 0)") == 1
+    assert lines.count("MsTTNS component CS1 (local index 1)") == 1
+    # Both two-node TTNS trees are rendered, rather than only component zero.
+    assert sum("(" in line and ")" in line for line in lines) >= 4
+
+    with onp.testing.assert_raises(ValueError):
+        ms_ttns.print_shape(component_indices=[0, 1], component_labels=["only-one"])
 
 def test_expand_bond_dimension_multiset_uses_diag_and_cross_hints():
     basis_list = [BasisSHO("v0", 0.01, 2), BasisSHO("v1", 0.02, 2)]
@@ -151,9 +200,64 @@ def test_expand_bond_dimension_multiset_uses_diag_and_cross_hints():
     assert expanded.population()[1] > 0
 
 
+def test_expand_zero_component_before_active_component_uses_template():
+    basis_list = [BasisSHO("v0", 0.01, 2), BasisSHO("v1", 0.02, 2)]
+    basis_tree = BasisTree.linear(basis_list)
+    diagonal = Model(basis_list, [Op(r"b^\dagger b", "v0", 0.01)])
+    zero_model = Model(basis_list, [])
+    active = TTNS(basis_tree, condition={})
+    zero_state = active.copy().scale(0, inplace=True)
+    state = MsTTNS.from_ttns_list([zero_state, active])
+    state.compress_config = CompressConfig(CompressCriteria.fixed, max_bonddim=3)
+    operator = MsTTNO(
+        basis_tree,
+        [[diagonal, zero_model], [zero_model, diagonal]],
+        nset=2,
+    )
 
-def test_multiround_cross_hints_reach_second_neighbor():
-    basis = [BasisMultiElectronVac(["e0", "e1", "e2"]), BasisSHO("v", 0.01, 2)]
+    expanded = state.expand_bond_dimension_multiset(operator)
+
+    expanded.check_shape()
+    expanded.check_canonical()
+    assert max(expanded.component_bond_dims[0]) == 2
+    assert expanded.population()[0] > 0
+
+
+def test_pad_component_reaches_common_binary_tree_layout():
+    basis_list = [BasisSHO(f"v{i}", 0.01, 4) for i in range(8)]
+    basis_tree = BasisTree.binary_mctdh(basis_list, contract_primitive=True)
+    exact_dims = TTNS(basis_tree, condition={}).bond_dims_exact
+    target_dims = onp.asarray([min(int(dim), 16) for dim in exact_dims])
+    rank_deficient_dims = onp.minimum(target_dims, 6)
+    component = TTNS.random(basis_tree, 0, rank_deficient_dims)
+
+    padded = MsTTNS._pad_component_bond_dimension(component, target_dims)
+
+    onp.testing.assert_array_equal(padded.bond_dims, target_dims)
+    assert sorted(set(component.bond_dims)) == [1, 4, 6]
+    assert sorted(set(padded.bond_dims)) == [1, 4, 16]
+
+
+def test_krylov_limits_preserve_nonuniform_tree_profile():
+    # P3HT Tree at chi=128 has a root entry of zero, 15-dimensional terminal
+    # expansion edges, and 127-dimensional central expansion edges.  A scalar
+    # cap must never promote the terminal edges to the central-edge limit.
+    target = onp.asarray([0, 15, 127, 15, 127])
+
+    full = MsTTNS._krylov_bond_limits(target)
+    propagated = MsTTNS._krylov_bond_limits(target, scalar_cap=64)
+
+    onp.testing.assert_array_equal(full, [1, 15, 127, 15, 127])
+    onp.testing.assert_array_equal(propagated, [1, 15, 64, 15, 64])
+
+
+
+def test_mps_compatible_onehop_expansion_preserves_seeded_distant_row():
+    basis = [
+        BasisMultiElectronVac(["e0", "e1", "e2"]),
+        BasisSHO("v", 0.01, 2),
+        BasisSHO("w", 0.02, 2),
+    ]
     terms = [
         Op(r"a^\dagger a", "e0", 0.0),
         Op(r"a^\dagger a", "e1", 0.01),
@@ -163,23 +267,29 @@ def test_multiround_cross_hints_reach_second_neighbor():
         Op(r"a^\dagger a", ["e1", "e2"], 0.006),
         Op(r"a^\dagger a", ["e2", "e1"], 0.006),
         Op(r"b^\dagger b", "v", 0.01),
+        Op(r"b^\dagger b", "w", 0.02),
     ]
     model = Model(basis, terms)
     ms_model = MultisetModel(model, max_bonddim=4, auto_init=False)
     init = Mps.hartree_product_state(ms_model.init_model, {})
-    zero = init.copy().scale(0, inplace=True)
+    seed = init.copy().scale(1e-10, inplace=True)
     basis_tree = BasisTree.linear(ms_model.init_model.basis[::-1])
     ms_ttns = MsTTNS.from_ttns_list([
         _mps_to_linear_ttns(init, basis_tree),
-        _mps_to_linear_ttns(zero, basis_tree),
-        _mps_to_linear_ttns(zero, basis_tree),
+        _mps_to_linear_ttns(seed, basis_tree),
+        _mps_to_linear_ttns(seed, basis_tree),
     ])
     ms_ttns.compress_config = CompressConfig(CompressCriteria.fixed, max_bonddim=4)
     ms_ttno = MsTTNO.from_multiset_model(basis_tree, ms_model)
 
-    hints = ms_ttns._build_multiround_cross_hints(ms_ttns.to_ttns_list(), ms_ttno, graph_rounds=2)
+    expanded = ms_ttns.expand_bond_dimension_multiset(ms_ttno)
+    populations = expanded.population()
 
-    assert hints[1]
-    assert hints[2]
-    second_neighbor_hint = MsTTNS._sum_ttns(hints[2], compress=False)
-    assert second_neighbor_hint.norm > 0
+    expanded.check_shape()
+    expanded.check_canonical()
+    assert populations[1] > 0
+    assert populations[2] > 0
+    # The distant component has no direct connection to the active row.  Its
+    # nonzero state therefore comes from the same epsilon vacuum seed used by
+    # multiset-MPS, not from a hidden multi-round graph propagation.
+    onp.testing.assert_allclose(populations[2], 1e-20, rtol=1e-6, atol=1e-26)

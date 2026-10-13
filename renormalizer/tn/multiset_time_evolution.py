@@ -1,3 +1,4 @@
+import gc
 import logging
 import time
 from typing import List, Tuple, Union
@@ -22,24 +23,34 @@ def _node_debug_label(snode: MsTreeNodeTensor, ms_ttns: MsTTNS):
 
 def evolve_ms_tdvp_ps(ms_ttns: MsTTNS, ms_ttno: MsTTNO, coeff: Union[complex, float], tau: float):
     ms_ttns.check_canonical()
+    ms_ttne = None
+    try:
+        time_start = time.perf_counter()
+        ms_ttne = MsTTNEnviron(ms_ttns, ms_ttno)
+        logger.debug("MS-TDVP-PS profile MsTTNEnviron_init seconds=%.6f", time.perf_counter() - time_start)
 
-    time_start = time.perf_counter()
-    ms_ttne = MsTTNEnviron(ms_ttns, ms_ttno)
-    logger.info("MS-TDVP-PS profile MsTTNEnviron_init seconds=%.6f", time.perf_counter() - time_start)
+        time_start = time.perf_counter()
+        local_steps1 = _tdvp_ps_forward(ms_ttns, ms_ttno, ms_ttne, coeff, tau / 2)
+        logger.debug("MS-TDVP-PS profile forward_sweep seconds=%.6f", time.perf_counter() - time_start)
 
-    time_start = time.perf_counter()
-    local_steps1 = _tdvp_ps_forward(ms_ttns, ms_ttno, ms_ttne, coeff, tau / 2)
-    logger.info("MS-TDVP-PS profile forward_sweep seconds=%.6f", time.perf_counter() - time_start)
+        time_start = time.perf_counter()
+        local_steps2 = _tdvp_ps_backward(ms_ttns, ms_ttno, ms_ttne, coeff, tau / 2)
+        logger.debug("MS-TDVP-PS profile backward_sweep seconds=%.6f", time.perf_counter() - time_start)
 
-    time_start = time.perf_counter()
-    local_steps2 = _tdvp_ps_backward(ms_ttns, ms_ttno, ms_ttne, coeff, tau / 2)
-    logger.info("MS-TDVP-PS profile backward_sweep seconds=%.6f", time.perf_counter() - time_start)
-
-    if local_steps1 or local_steps2:
-        steps_stat = stats.describe(local_steps1 + local_steps2)
-        logger.debug(f"MS-TDVP-PS Krylov space: {steps_stat}")
-        ms_ttns.evolve_config.stat = steps_stat
-    return ms_ttns
+        if local_steps1 or local_steps2:
+            steps_stat = stats.describe(local_steps1 + local_steps2)
+            logger.info(f"TDVP-PS Krylov space: {steps_stat}")
+            ms_ttns.evolve_config.stat = steps_stat
+        return ms_ttns
+    finally:
+        if ms_ttne is not None:
+            ms_ttne.release()
+        # TTNS nodes have bidirectional parent/child links.  Collect them here,
+        # after the environment arrays have been detached, instead of allowing
+        # unreachable sweep objects to accumulate until Python's next
+        # generation-2 collection.
+        ms_ttne = None
+        gc.collect()
 
 
 def _new_sweep_profile():
@@ -60,7 +71,7 @@ def _add_profile_time(profile, key, time_start):
 
 def _log_sweep_detail(name, profile, local_steps):
     total = sum(profile.values())
-    logger.info(
+    logger.debug(
         "MS-TDVP-PS profile %s detail total_accounted=%.6f evolve_1site=%.6f evolve_0site=%.6f "
         "decompose=%.6f merge=%.6f push_cano=%.6f children_env_update=%.6f parent_env_update=%.6f "
         "nlocal=%d",
@@ -89,7 +100,7 @@ def _tdvp_ps_forward(
             time_part = time.perf_counter()
             ms, j = evolve_1site(snode, ms_ttns, ms_ttno, ms_ttne, coeff, tau)
             _add_profile_time(profile, "evolve_1site", time_part)
-            snode.tensor = ms.reshape(snode.shape)
+            ms_ttns.set_node_tensor_batch(snode, ms.reshape((ms_ttns.nset,) + snode.shape))
             local_steps.append(j)
 
             if snode.parent is None:
@@ -145,7 +156,7 @@ def _tdvp_ps_backward(
             time_part = time.perf_counter()
             ms, j = evolve_1site(snode, ms_ttns, ms_ttno, ms_ttne, coeff, tau)
             _add_profile_time(profile, "evolve_1site", time_part)
-            snode.tensor = ms.reshape(snode.shape)
+            ms_ttns.set_node_tensor_batch(snode, ms.reshape((ms_ttns.nset,) + snode.shape))
             local_steps.append(j)
         if ichild == len(snode.children) - 1:
             if snode is not ms_ttns.root:
@@ -193,7 +204,7 @@ def evolve_1site(
     coeff: Union[complex, float],
     tau: float,
 ):
-    ms = snode.tensor
+    ms = ms_ttns.node_tensor_batch(snode)
     hop = ms_hop_expr1(snode, ms_ttns, ms_ttno, ms_ttne)
     ms_t, j = expm_krylov(lambda y: hop(y), coeff * tau, asxp(ms).ravel())
     inode, dofs = _node_debug_label(snode, ms_ttns)
@@ -231,4 +242,3 @@ def evolve_0site(
         j,
     )
     return ms_t, j
-
